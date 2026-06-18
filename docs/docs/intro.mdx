@@ -4,35 +4,40 @@ sidebar_position: 1
 
 # Introduction
 
-**Session Broker** is a cloud-native microservice for AI agent orchestration. It tracks user identities and session state across Agent and MCP (Model Context Protocol) invocations, acting as the authoritative source of truth for who is in a session and which agent owns it at any point in time.
+**Session Broker** is a cloud-native identity bridge for AI agent orchestration. It connects channel identities (Slack/Teams), Keycloak authentication state, and workflow identities consumed by Agents and MCP servers.
 
 ## What it does
 
-- **Creates sessions** — binds a Keycloak-authenticated user identity to a new agent session
-- **Maintains state** — stores arbitrary session payload in Redis via the Dapr state store API
-- **Hands off sessions** — transfers ownership of a session from one agent to another
-- **Terminates sessions** — marks sessions as terminated when the interaction is complete
+- **Caches JWTs after authentication callback** — receives direct Keycloak callback and stores encrypted token material in Redis
+- **Resolves user identity on every chat event** — loads cached auth context by Slack user ID
+- **Converts identity to workflow trust model** — maps user/channel identity into SPIFFE + Istio identity contract
+- **Enforces token lifetime** — uses token `exp` as strict TTL for cache validity
 
 ## Core integrations
 
 | Component | Role |
 |---|---|
-| **Dapr sidecar** | Service invocation transport, Redis state store abstraction, JWT bearer middleware |
-| **Keycloak** | Identity provider — issues JWTs validated by Dapr before requests reach the service |
-| **Redis** | Persistent session store (accessed exclusively through the Dapr state API) |
+| **Dapr sidecar** | Service invocation transport and Redis state store abstraction |
+| **Keycloak** | Identity provider and OAuth callback origin to the broker |
+| **Redis** | Token cache (encrypted raw tokens + metadata, keyed by Slack user ID) |
+| **Istio / SPIFFE** | Workflow identity target for downstream Agent/MCP access control |
 | **Argo CD** | GitOps delivery — app-of-apps pattern drives all deployments |
 
-## How authentication works
+## Primary workflows
 
-Dapr's `middleware.http.bearer` component intercepts every inbound HTTP request and validates the JWT signature and expiry against Keycloak's JWKS endpoint. Only requests carrying a valid token reach the FastAPI application. The service itself never calls Keycloak — it simply decodes the already-validated JWT payload to extract identity claims (`sub`, `email`, `realm_access.roles`).
+### Write workflow (token cache)
 
-```
-Client ──Bearer JWT──▶ Dapr sidecar ──validates──▶ Keycloak JWKS
-                              │
-                              │ (valid token forwarded)
-                              ▼
-                       FastAPI app (decodes claims, no re-validation)
-```
+1. User attempts privileged action in Slack/Teams.
+2. External gateway initiates Keycloak auth with Google IdP.
+3. Keycloak callback hits Session Broker directly.
+4. Broker stores encrypted access/refresh/ID tokens in Redis with strict `exp` TTL and emits audit log.
+
+### Read workflow (identity conversion)
+
+1. A new chat event arrives with Slack identity.
+2. Broker fetches token context by Slack user ID.
+3. Broker validates expiry and authorization context.
+4. Broker returns a workflow identity contract and mints/requests SPIFFE/Istio-compatible token for downstream agent execution.
 
 ## Repository layout
 
@@ -42,4 +47,4 @@ gitops/       Kubernetes manifests (Kustomize + Helm, managed by Argo CD)
 docs/         This documentation site (Docusaurus, deployed to GitHub Pages)
 ```
 
-Browse the sidebar to explore the [Architecture](./architecture/overview), [API Reference](./api/sessions), [GitOps](./gitops/overview), and [Local Development](./development/local-setup) sections.
+Browse the sidebar to explore the [Architecture](./architecture/overview), [API Reference](./api/token-broker), [GitOps](./gitops/overview), and [Local Development](./development/local-setup) sections.

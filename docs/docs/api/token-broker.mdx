@@ -1,0 +1,143 @@
+---
+sidebar_position: 1
+---
+
+# Token Broker API
+
+This API captures the two primary broker operations:
+
+1. Write operation: store authenticated token material after Keycloak callback.
+2. Read operation: resolve cached token data and return workflow identity contract for Agent/MCP calls.
+
+## Security and policy assumptions
+
+- Canonical cache key: Slack user ID.
+- Token material stored encrypted in Redis.
+- TTL policy: strict `exp` claim.
+- Every read/write emits an audit log event.
+
+## 1) Write endpoint: Keycloak callback cache
+
+### REST
+
+`POST /auth/callback/cache`
+
+**Request**
+
+```json
+{
+  "slack_user_id": "U07ABC123",
+  "keycloak_realm": "enterpriseclaw",
+  "tokens": {
+    "access_token": "<jwt>",
+    "refresh_token": "<opaque-or-jwt>",
+    "id_token": "<jwt>"
+  },
+  "claims": {
+    "sub": "9f8b...",
+    "email": "user@company.com",
+    "realm_roles": ["authenticated", "agent:db.create"]
+  }
+}
+```
+
+**Response 200**
+
+```json
+{
+  "cache_key": "slack:U07ABC123",
+  "expires_at": "2026-06-18T15:44:00Z",
+  "written": true,
+  "audit_id": "evt_01JZ..."
+}
+```
+
+### Dapr service invocation
+
+```http
+POST /v1.0/invoke/session-broker/method/auth/callback/cache
+Content-Type: application/json
+```
+
+---
+
+## 2) Read endpoint: resolve and convert identity
+
+### REST
+
+`POST /identity/resolve`
+
+**Request**
+
+```json
+{
+  "slack_user_id": "U07ABC123",
+  "requested_action": "agent.db.create",
+  "channel": "slack",
+  "tenant_id": "enterpriseclaw-prod"
+}
+```
+
+**Response 200**
+
+```json
+{
+  "authenticated": true,
+  "cache_key": "slack:U07ABC123",
+  "expires_at": "2026-06-18T15:44:00Z",
+  "authorization": {
+    "allowed": true,
+    "roles": ["authenticated", "agent:db.create"],
+    "reason": "role_match"
+  },
+  "workflow_identity": {
+    "spiffe_id": "spiffe://enterpriseclaw.io/workflow/user/U07ABC123",
+    "istio_subject": "cluster.local/ns/session-broker/sa/session-broker",
+    "token": "<workflow-token-or-reference>"
+  },
+  "audit_id": "evt_01JZ..."
+}
+```
+
+**Response 404** (not cached / unauthenticated)
+
+```json
+{
+  "authenticated": false,
+  "reason": "token_not_cached"
+}
+```
+
+**Response 401** (cached token expired)
+
+```json
+{
+  "authenticated": false,
+  "reason": "token_expired"
+}
+```
+
+### Dapr service invocation
+
+```http
+POST /v1.0/invoke/session-broker/method/identity/resolve
+Content-Type: application/json
+```
+
+---
+
+## 3) Health endpoint
+
+`GET /health`
+
+```json
+{ "status": "ok" }
+```
+
+---
+
+## Notes
+
+- Auth URL generation remains outside this broker.
+- Broker does not own unauthenticated pre-session creation.
+- Broker should never return raw cached tokens to callers.

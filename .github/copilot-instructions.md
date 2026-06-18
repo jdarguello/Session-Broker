@@ -25,9 +25,8 @@ ruff check app/                         # lint
 
 A session broker in an AI agent orchestration context:
 - Tracks user identity across Agent and MCP invocations
-- Maintains session state across agent invocations
-- Routes requests to the appropriate agent or sub-agent
-- Manages lifecycle (creation, handoff, termination) of agent sessions
+- Caches authenticated user token material after Keycloak callback events
+- Resolves cached identity for every chat event and converts it to workflow identity (SPIFFE + Istio)
 - Integrates with **Dapr** as middleware/sidecar for service invocation, pub/sub, and state management
 - Integrates with **Keycloak** for identity, authentication, and authorization
 
@@ -44,10 +43,11 @@ A session broker in an AI agent orchestration context:
 
 ### Dapr + Keycloak integration pattern (from https://oneuptime.com/blog/post/2026-03-31-dapr-with-keycloak/view)
 
-- Dapr `middleware.http.bearer` component validates JWTs against Keycloak's JWKS endpoint
-- The Dapr `Configuration` applies the middleware to the HTTP pipeline
-- The service **does not verify** tokens itself; it only decodes the already-validated JWT payload to extract `sub`, `email`, and `realm_access.roles`
-- Session identity is derived from JWT claims on every request
+- Keycloak callback invokes broker write endpoint to persist encrypted token material
+- Cache key is Slack user ID, with strict `exp` claim TTL policy
+- Broker read endpoint resolves identity for each chat event and returns workflow identity contract
+- Broker supports SPIFFE + Istio integration boundary for downstream authorization
+- Redis persistence includes audit logs for every token read/write operation
 
 ## Project Structure
 
@@ -89,6 +89,7 @@ gitops/       # Kubernetes / GitOps manifests
 
 - Keep the deployment target (Kubernetes + Dapr sidecar) in mind for all design decisions
 - Prefer cloud-native, observable, and operationally simple solutions
+- For every design/architecture definition, feel free to ask any question that comes to your mind. I need everything to be as clearer as possible.
 
 ## Agent Behavior
 
