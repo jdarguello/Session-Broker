@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: session-broker
+  namespace: session-broker
+spec:
+  replicas: 1
+  template:
+    spec:
+      containers:
+        - name: session-broker
+          env:
+            - name: APP_ENV
+              value: "development"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"

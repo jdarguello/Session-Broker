@@ -1,0 +1,12 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: session-broker
+
+resources:
+  - serviceaccount.yaml
+  - deployment.yaml
+  - service.yaml
+  - dapr-statestore.yaml
+  - dapr-bearer-middleware.yaml
+  - dapr-configuration.yaml

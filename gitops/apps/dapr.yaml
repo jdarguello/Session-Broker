@@ -1,0 +1,29 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: dapr
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://dapr.github.io/helm-charts/
+    chart: dapr
+    targetRevision: "1.14.4"
+    helm:
+      valuesFiles:
+        - values.yaml
+      # Inline values are set via the file at gitops/dapr/values.yaml
+      # referenced by the path below — Argo CD resolves multiple sources
+      # if using the multi-source feature; otherwise keep values.yaml
+      # committed next to this Application and use a valueFiles ref.
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: dapr-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

@@ -1,0 +1,15 @@
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: keycloak-validator
+  namespace: session-broker
+spec:
+  type: middleware.http.bearer
+  version: v1
+  metadata:
+    - name: jwksURL
+      value: "http://keycloak.keycloak.svc.cluster.local/realms/session-broker/protocol/openid-connect/certs"
+    - name: audience
+      value: "session-broker-client"
+    - name: issuer
+      value: "http://keycloak.keycloak.svc.cluster.local/realms/session-broker"

@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: session-broker
+  namespace: session-broker
+  labels:
+    app: session-broker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: session-broker
+  template:
+    metadata:
+      labels:
+        app: session-broker
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "session-broker"
+        dapr.io/app-port: "8000"
+        dapr.io/config: "keycloak-config"
+        dapr.io/log-level: "info"
+    spec:
+      serviceAccountName: session-broker
+      containers:
+        - name: session-broker
+          image: ghcr.io/jdarguello/session-broker:latest
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DAPR_STATE_STORE
+              value: "redis"
+            - name: APP_ENV
+              value: "production"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"

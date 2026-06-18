@@ -7,11 +7,19 @@ Session Broker for AI Agent Orchestration. A microservice that tracks user ident
 ## Repository State
 
 - `docs/` — Docusaurus site initialized and deployed via GitHub Pages
-- `src/` — application source code (language/framework not yet decided)
-- `gitops/` — Kubernetes/GitOps manifests (empty, structure not yet decided)
+- `src/` — Python + FastAPI session broker application
+- `gitops/` — Kustomize + Helm-based Kubernetes/GitOps manifests, managed by Argo CD
 - `.github/workflows/deploy-docs.yml` — CI/CD for docs
 
-When adding source code, establish the language/framework first and update build, test, and lint commands in this file.
+### Build / Test / Lint (src/)
+
+```bash
+cd src
+pip install -r requirements.txt
+uvicorn app.main:app --reload          # local dev
+pytest                                  # tests
+ruff check app/                         # lint
+```
 
 ## Architecture Intent
 
@@ -23,20 +31,42 @@ A session broker in an AI agent orchestration context:
 - Integrates with **Dapr** as middleware/sidecar for service invocation, pub/sub, and state management
 - Integrates with **Keycloak** for identity, authentication, and authorization
 
-## Design Decisions (pending)
+## Design Decisions (resolved)
 
-The following have not yet been decided and should be discussed before implementation begins:
-- **Language/framework**: for `src/`
-- **Transport**: HTTP, gRPC, or message queue (via Dapr)
-- **Persistence**: in-memory, Redis, or a database (via Dapr state store)
-- **GitOps structure**: Helm, Kustomize, or raw manifests in `gitops/`
+| Concern | Decision |
+|---|---|
+| Language / framework | **Python + FastAPI** |
+| Transport | **HTTP** via Dapr service invocation |
+| Persistence | **Redis** via Dapr state store |
+| GitOps layout | **Kustomize** for the session-broker; **Helm** (via Argo CD Application) for Dapr, Keycloak, Redis |
+| Argo CD pattern | **App-of-apps**: `gitops/apps/` holds child Application manifests; root app syncs that folder |
+| Keycloak | **Deployed in-cluster** via Bitnami Helm chart, managed by Argo CD |
+
+### Dapr + Keycloak integration pattern (from https://oneuptime.com/blog/post/2026-03-31-dapr-with-keycloak/view)
+
+- Dapr `middleware.http.bearer` component validates JWTs against Keycloak's JWKS endpoint
+- The Dapr `Configuration` applies the middleware to the HTTP pipeline
+- The service **does not verify** tokens itself; it only decodes the already-validated JWT payload to extract `sub`, `email`, and `realm_access.roles`
+- Session identity is derived from JWT claims on every request
 
 ## Project Structure
 
 ```
 docs/         # Docusaurus documentation site (deployed to GitHub Pages)
-src/          # Application source code
+src/          # Python + FastAPI session broker
+  app/
+    main.py             # FastAPI entry point
+    routers/            # sessions, health
+    models/             # Pydantic models (Session, etc.)
+    services/           # Session service (Dapr state store), auth helpers
+  Dockerfile
+  requirements.txt
 gitops/       # Kubernetes / GitOps manifests
+  apps/                 # Argo CD App-of-apps (root + child Applications)
+  session-broker/       # Kustomize base + overlays (dev, prod)
+  dapr/                 # Helm values for Dapr installation
+  keycloak/             # Helm values for Keycloak (Bitnami)
+  redis/                # Helm values for Redis (Bitnami)
 .github/
   workflows/  # CI/CD pipelines
     deploy-docs.yml  # Builds and deploys docs to GitHub Pages
@@ -57,7 +87,6 @@ gitops/       # Kubernetes / GitOps manifests
 
 ## Guidelines
 
-- Discuss architecture and language/framework choices before writing code
 - Keep the deployment target (Kubernetes + Dapr sidecar) in mind for all design decisions
 - Prefer cloud-native, observable, and operationally simple solutions
 

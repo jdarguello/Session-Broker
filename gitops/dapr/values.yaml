@@ -1,0 +1,18 @@
+# Dapr Helm values
+# https://github.com/dapr/helm-charts/tree/main/charts/dapr
+
+global:
+  ha:
+    enabled: false   # set true for production HA mode
+
+dapr_operator:
+  replicaCount: 1
+
+dapr_sentry:
+  replicaCount: 1
+
+dapr_placement:
+  replicaCount: 1
+
+dapr_dashboard:
+  enabled: true

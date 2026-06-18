@@ -1,0 +1,10 @@
+apiVersion: dapr.io/v1alpha1
+kind: Configuration
+metadata:
+  name: keycloak-config
+  namespace: session-broker
+spec:
+  httpPipeline:
+    handlers:
+      - name: keycloak-validator
+        type: middleware.http.bearer

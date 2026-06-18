@@ -1,0 +1,21 @@
+# Redis Bitnami Helm values
+# https://github.com/bitnami/charts/tree/main/bitnami/redis
+
+architecture: standalone
+
+auth:
+  enabled: true
+  existingSecret: redis-secret
+  existingSecretPasswordKey: redis-password
+
+master:
+  persistence:
+    enabled: true
+    size: 2Gi
+
+replica:
+  replicaCount: 0  # standalone mode; set >0 for HA
+
+service:
+  type: ClusterIP
+  port: 6379

@@ -1,0 +1,26 @@
+# Keycloak Bitnami Helm values
+# https://github.com/bitnami/charts/tree/main/bitnami/keycloak
+
+auth:
+  adminUser: admin
+  # adminPassword is set via a Kubernetes Secret — do not store plaintext here
+  existingSecret: keycloak-admin-secret
+  existingSecretKey: admin-password
+
+replicaCount: 1
+
+postgresql:
+  enabled: true
+  auth:
+    existingSecret: keycloak-postgresql-secret
+
+service:
+  type: ClusterIP
+  ports:
+    http: 80
+
+ingress:
+  enabled: false  # enable and configure for external access
+
+# Keycloak realm / client bootstrap is handled out-of-band via the Keycloak Admin API
+# or a separate Job after the chart is deployed.
