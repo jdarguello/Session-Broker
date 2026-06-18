@@ -30,6 +30,14 @@ A session broker in an AI agent orchestration context:
 - Integrates with **Dapr** as middleware/sidecar for service invocation, pub/sub, and state management
 - Integrates with **Keycloak** for identity, authentication, and authorization
 
+## Architecture Source Of Truth
+
+The primary responsibility of this service is **token brokerage**, not generic session CRUD:
+- Write flow: Keycloak callback stores encrypted token set in Redis
+- Read flow: channel event resolves token context and returns workflow identity contract (SPIFFE/Istio)
+
+Session CRUD endpoints are secondary/legacy unless explicitly requested.
+
 ## Design Decisions (resolved)
 
 | Concern | Decision |
@@ -48,6 +56,32 @@ A session broker in an AI agent orchestration context:
 - Broker read endpoint resolves identity for each chat event and returns workflow identity contract
 - Broker supports SPIFFE + Istio integration boundary for downstream authorization
 - Redis persistence includes audit logs for every token read/write operation
+
+## Canonical Identity Key
+
+- Primary cache key: Slack user ID
+- Future multi-tenant extension (optional): `<tenant-id>:<slack-user-id>`
+
+## Token Storage Contract
+
+- Cache: access token + refresh token + ID token
+- Storage format: encrypted raw token payload + metadata
+- Expiration: strict token `exp` claim policy
+
+## Security And Observability Guardrails
+
+- Audit log every token read and write
+- Never log token values in app logs, errors, or API responses
+- Reject expired token material on read path
+- Keep Redis encryption at rest enabled
+
+## API Contract Priority
+
+Prioritize these broker APIs in docs and implementation:
+- `POST /auth/callback/cache`
+- `POST /identity/resolve`
+
+Support both direct REST and Dapr service invocation examples.
 
 ## Project Structure
 
