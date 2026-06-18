@@ -46,6 +46,11 @@ gitops/       # Kubernetes / GitOps manifests
 - Keep the deployment target (Kubernetes) in mind for all design decisions
 - Prefer cloud-native, observable, and operationally simple solutions
 
+## Agent Behavior
+
+- Execute terminal commands freely without asking for confirmation, **except** for operations that delete files, folders, or content (those require explicit approval)
+- Trust your judgment for installs, builds, edits, and git operations
+
 ## Git Workflow
 
 - After every task that involves code changes, stage all modified/new files, commit with a descriptive message, and push to `origin main` immediately
