@@ -2,7 +2,12 @@
 
 Session Broker is the identity bridge between EnterpriseClaw chat channels (Slack and Microsoft Teams), Keycloak, and your agent execution plane.
 
-It is designed around two critical workflows:
+Current implementation focus:
+
+1. Authenticated session lifecycle APIs (`/sessions`).
+2. Session state persistence in Redis via Dapr state API.
+
+Planned roadmap focus:
 
 1. Write operation: cache user tokens after Keycloak callback.
 2. Read operation: resolve cached identity for each chat event and convert it to workflow identity (SPIFFE + Istio contract).
@@ -17,6 +22,13 @@ EnterpriseClaw preserves channel identity even before authentication. Users can 
 When a user attempts a privileged action (ticket creation, DB creation, etc.), authentication is handled externally via Keycloak. After successful login, Keycloak calls this broker directly, and the broker stores encrypted token material in Redis.
 
 ## Core workflows
+
+### 0) Current implementation
+
+- Input source: authenticated callers with bearer token.
+- Session identity source: JWT claims (`sub`, `email`, `realm_access.roles`).
+- API surface: `POST/GET/PATCH/DELETE /sessions`, `POST /sessions/{id}/handoff`, `GET /health`.
+- Persistence: Redis via Dapr state store (`redis`).
 
 ### 1) Token cache write (post-auth callback)
 

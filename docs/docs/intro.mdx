@@ -4,40 +4,45 @@ sidebar_position: 1
 
 # Introduction
 
-**Session Broker** is a cloud-native identity bridge for AI agent orchestration. It connects channel identities (Slack/Teams), Keycloak authentication state, and workflow identities consumed by Agents and MCP servers.
+**Session Broker** is a cloud-native identity bridge for AI agent orchestration. It currently provides authenticated session lifecycle APIs and is evolving toward full token brokerage for Agent/MCP identity resolution.
 
-## What it does
+## Current capabilities
 
-- **Caches JWTs after authentication callback** — receives direct Keycloak callback and stores encrypted token material in Redis
-- **Resolves user identity on every chat event** — loads cached auth context by Slack user ID
-- **Converts identity to workflow trust model** — maps user/channel identity into SPIFFE + Istio identity contract
-- **Enforces token lifetime** — uses token `exp` as strict TTL for cache validity
+- **Creates and manages agent sessions** — exposes `POST/GET/PATCH/DELETE /sessions` plus `POST /sessions/{id}/handoff`
+- **Extracts user identity from bearer token claims** — reads `sub`, `email`, and `realm_access.roles`
+- **Stores session state in Redis via Dapr state API** — uses Dapr sidecar for state I/O abstraction
+- **Supports health checks for runtime probes** — `GET /health`
+
+## Target capabilities (planned)
+
+- Token callback cache write: `POST /auth/callback/cache`
+- Identity resolution for channel events: `POST /identity/resolve`
+- Workflow identity conversion contract for downstream SPIFFE/Istio boundaries
 
 ## Core integrations
 
 | Component | Role |
 |---|---|
 | **Dapr sidecar** | Service invocation transport and Redis state store abstraction |
-| **Keycloak** | Identity provider and OAuth callback origin to the broker |
-| **Redis** | Token cache (encrypted raw tokens + metadata, keyed by Slack user ID) |
+| **Keycloak** | Identity provider; tokens are validated by Dapr bearer middleware |
+| **Redis** | Session state persistence through Dapr state store (`redis`) |
 | **Istio / SPIFFE** | Workflow identity target for downstream Agent/MCP access control |
 | **Argo CD** | GitOps delivery — app-of-apps pattern drives all deployments |
 
-## Primary workflows
+## Runtime workflows
 
-### Write workflow (token cache)
+### Current workflow (implemented)
 
-1. User attempts privileged action in Slack/Teams.
-2. External gateway initiates Keycloak auth with Google IdP.
-3. Keycloak callback hits Session Broker directly.
-4. Broker stores encrypted access/refresh/ID tokens in Redis with strict `exp` TTL and emits audit log.
+1. Client calls Session Broker with `Authorization: Bearer <token>`.
+2. Dapr bearer middleware validates signature/issuer/audience (cluster runtime).
+3. Broker decodes JWT payload claims and creates/reads/updates session state.
+4. Session data is persisted in Redis through Dapr state APIs.
 
-### Read workflow (identity conversion)
+### Planned workflow (not yet implemented)
 
-1. A new chat event arrives with Slack identity.
-2. Broker fetches token context by Slack user ID.
-3. Broker validates expiry and authorization context.
-4. Broker returns a workflow identity contract and mints/requests SPIFFE/Istio-compatible token for downstream agent execution.
+1. Keycloak callback stores encrypted token material keyed by channel identity.
+2. Chat events call identity resolution endpoint.
+3. Broker returns workflow identity contract for agent execution.
 
 ## Repository layout
 

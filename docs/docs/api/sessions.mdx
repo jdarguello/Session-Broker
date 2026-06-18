@@ -2,13 +2,135 @@
 sidebar_position: 2
 ---
 
-# Session Lifecycle API (Legacy)
+# Session Lifecycle API (Current)
 
-This page documents the earlier session CRUD shape. The current primary contract for this project is the Token Broker API:
+This is the currently implemented API surface in the FastAPI service.
 
-- [Token Broker API](./token-broker)
+## Authentication
 
-If session CRUD remains in scope for your implementation, keep these endpoints under `/sessions` as a secondary API surface while prioritizing:
+- Endpoints require `Authorization: Bearer <token>` (except `GET /health`).
+- In cluster deployments, Dapr bearer middleware validates token signature/issuer/audience before forwarding to the app.
+- The app decodes claims and uses:
+  - `sub` as `user_id`
+  - `email` as `user_email`
+  - `realm_access.roles` as `roles`
 
-1. `POST /auth/callback/cache`
-2. `POST /identity/resolve`
+## 1) Create session
+
+`POST /sessions`
+
+**Request**
+
+```json
+{
+  "agent": "agent-alpha",
+  "state": {
+    "channel": "slack"
+  }
+}
+```
+
+**Response 201**
+
+```json
+{
+  "id": "3f7a1b2c-9d7f-4d92-a991-3cc7fdbf1274",
+  "user_id": "user-123",
+  "user_email": "user@example.com",
+  "roles": ["authenticated"],
+  "current_agent": "agent-alpha",
+  "state": {
+    "channel": "slack"
+  },
+  "status": "active",
+  "created_at": "2026-06-18T10:00:00Z",
+  "updated_at": "2026-06-18T10:00:00Z"
+}
+```
+
+## 2) Get session
+
+`GET /sessions/{session_id}`
+
+**Response 200**: returns a `Session` object.
+
+**Response 404**
+
+```json
+{
+  "detail": "Session not found"
+}
+```
+
+## 3) Update session
+
+`PATCH /sessions/{session_id}`
+
+**Request**
+
+```json
+{
+  "state": {
+    "step": "awaiting-approval"
+  },
+  "current_agent": "agent-beta"
+}
+```
+
+**Response 200**: returns updated `Session` object.
+
+**Response 404**
+
+```json
+{
+  "detail": "Session not found"
+}
+```
+
+## 4) Handoff session
+
+`POST /sessions/{session_id}/handoff`
+
+**Request**
+
+```json
+{
+  "target_agent": "agent-gamma"
+}
+```
+
+**Response 200**: returns updated `Session` object with new `current_agent`.
+
+## 5) Terminate session (logical delete)
+
+`DELETE /sessions/{session_id}`
+
+**Response 204**: no body.
+
+The current implementation sets `status` to `terminated` and keeps the record in Redis.
+
+## 6) Health
+
+`GET /health`
+
+**Response 200**
+
+```json
+{
+  "status": "ok"
+}
+```
+
+## Dapr invocation examples
+
+```http
+POST   /v1.0/invoke/session-broker/method/sessions
+GET    /v1.0/invoke/session-broker/method/sessions/{session_id}
+PATCH  /v1.0/invoke/session-broker/method/sessions/{session_id}
+POST   /v1.0/invoke/session-broker/method/sessions/{session_id}/handoff
+DELETE /v1.0/invoke/session-broker/method/sessions/{session_id}
+```
+
+## Related
+
+- [Token Broker API](./token-broker) describes planned endpoints not yet implemented.

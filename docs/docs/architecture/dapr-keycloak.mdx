@@ -4,32 +4,45 @@ sidebar_position: 2
 
 # Dapr + Keycloak Integration
 
-Session Broker uses Keycloak as the authentication authority and Dapr as the runtime transport/state abstraction for callback and identity-resolution operations.
+Session Broker uses Keycloak as token issuer and Dapr as runtime middleware plus state abstraction.
 
-## How it works
+## Current integration (implemented)
 
-### 1. Keycloak callback is the write trigger
+### 1. Dapr bearer middleware validates incoming tokens
 
-After user authentication against Google IdP through Keycloak, Keycloak calls the broker directly. The broker persists encrypted token material in Redis keyed by Slack user ID.
+The Session Broker does not validate JWT signatures itself. Dapr's `middleware.http.bearer` component validates signature, issuer, audience, and expiry before requests reach FastAPI.
 
-Expected payload shape (conceptual):
+Middleware component:
 
-```json
-{
-  "slack_user_id": "U07ABC123",
-  "tokens": {
-    "access_token": "...",
-    "refresh_token": "...",
-    "id_token": "..."
-  },
-  "claims": {
-    "sub": "...",
-    "realm_roles": ["authenticated"]
-  }
-}
+```yaml
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: keycloak-validator
+  namespace: session-broker
+spec:
+  type: middleware.http.bearer
+  version: v1
+  metadata:
+    - name: jwksURL
+      value: "http://keycloak.keycloak.svc.cluster.local/realms/session-broker/protocol/openid-connect/certs"
+    - name: audience
+      value: "session-broker-client"
+    - name: issuer
+      value: "http://keycloak.keycloak.svc.cluster.local/realms/session-broker"
 ```
 
-### 2. Dapr state component handles Redis I/O
+### 2. Broker decodes claims for app-level identity fields
+
+After Dapr validation succeeds, the broker extracts these claims from JWT payload:
+
+- `sub` -> `user_id`
+- `email` -> `user_email`
+- `realm_access.roles` -> `roles`
+
+This identity data is attached to session documents.
+
+### 3. Dapr state component handles Redis I/O
 
 `gitops/session-broker/base/dapr-statestore.yaml` defines the state store used by the broker:
 
@@ -47,33 +60,43 @@ spec:
       value: "redis-master.redis.svc.cluster.local:6379"
 ```
 
-### 3. Read path resolves channel identity to workflow identity
+### 4. Current API surface behind this integration
 
-For each incoming chat event, broker resolves cache by Slack user ID and returns a workflow identity contract that downstream components can use in Istio/SPIFFE trust model.
+The currently implemented authenticated API surface is:
 
-Expected response shape (conceptual):
+```http
+POST   /sessions
+GET    /sessions/{session_id}
+PATCH  /sessions/{session_id}
+POST   /sessions/{session_id}/handoff
+DELETE /sessions/{session_id}
+GET    /health
+```
+
+## Planned token-broker extension (not implemented yet)
+
+The following contract remains a target architecture and is documented in the API section as planned:
 
 ```json
 {
-  "authenticated": true,
-  "authorization": {
-    "allowed": true,
-    "roles": ["authenticated", "agent:db.create"]
-  },
-  "workflow_identity": {
-    "spiffe_id": "spiffe://enterpriseclaw.io/workflow/user/U07ABC123",
-    "token": "<workflow-token-or-reference>"
-  }
+  "planned_endpoints": [
+    "POST /auth/callback/cache",
+    "POST /identity/resolve"
+  ]
 }
 ```
 
-### 4. Dapr invocation support
+## Dapr invocation support
 
-The broker exposes regular REST endpoints and can be called through Dapr service invocation:
+The current endpoints can also be called through Dapr service invocation:
 
 ```http
-POST /v1.0/invoke/session-broker/method/auth/callback/cache
-POST /v1.0/invoke/session-broker/method/identity/resolve
+POST   /v1.0/invoke/session-broker/method/sessions
+GET    /v1.0/invoke/session-broker/method/sessions/{session_id}
+PATCH  /v1.0/invoke/session-broker/method/sessions/{session_id}
+POST   /v1.0/invoke/session-broker/method/sessions/{session_id}/handoff
+DELETE /v1.0/invoke/session-broker/method/sessions/{session_id}
+GET    /v1.0/invoke/session-broker/method/health
 ```
 
 ## Keycloak realm setup
@@ -83,10 +106,10 @@ After Keycloak is deployed, configure the following (can be scripted via the Adm
 | Setting | Value |
 |---|---|
 | Realm | `session-broker` |
-| Client ID | `enterpriseclaw-channel-gateway` |
-| Client scopes | Define action-specific scopes for agent/MCP access |
-| Realm roles | At minimum `unauthenticated` and `authenticated`; extend with action roles |
-| Callback target | Session Broker `POST /auth/callback/cache` |
+| Client ID | `session-broker-client` |
+| Client scopes | Include scopes required by callers of `/sessions` endpoints |
+| Realm roles | Roles mapped into `realm_access.roles` claims |
+| Validation target | Dapr middleware validates bearer token before app logic |
 
 Keycloak's JWKS endpoint will be available at:
 ```

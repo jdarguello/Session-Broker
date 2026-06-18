@@ -4,60 +4,69 @@ sidebar_position: 1
 
 # Architecture Overview
 
-Session Broker is a single-responsibility microservice deployed on Kubernetes with a Dapr sidecar and integrated with Keycloak, Redis, and Istio.
+Session Broker is a FastAPI microservice deployed on Kubernetes with a Dapr sidecar and integrated with Keycloak and Redis.
 
-The broker has two explicit responsibilities:
+## Implementation status
 
-1. Write path: cache tokens after Keycloak callback.
-2. Read path: resolve cached token context and convert it to workflow identity.
+- **Implemented now**: authenticated session lifecycle (`/sessions`) backed by Redis via Dapr state store.
+- **Planned next**: token brokerage endpoints (`/auth/callback/cache`, `/identity/resolve`) for workflow identity conversion.
 
 ## Component diagram
 
-```
-                        ┌─────────────────────────────────────┐
-                        │            Kubernetes Cluster         │
-                        │                                       │
-    Keycloak callback ───▶│ Dapr sidecar ──▶ FastAPI broker       │
-                                                │                         │              │
-    Slack/Teams event ───▶│ Dapr sidecar ──▶ FastAPI broker       │
-                                                │                         │              │
-                                                │              Dapr state API            │
-                                                │                    │                   │
-                                                │                    ▼                   │
-                                                │                 Redis                  │
-                                                │                    │                   │
-                                                │                    ▼                   │
-                                                │         SPIFFE / Istio contract        │
-                        └─────────────────────────────────────┘
+```mermaid
+flowchart LR
+    Client[Client or Gateway] -->|Bearer token request| Dapr[Dapr sidecar\nHTTP bearer middleware]
+    Dapr --> Broker[FastAPI Session Broker]
+    Broker -->|State API| Dapr
+    Dapr --> Redis[(Redis state store)]
+    Keycloak[Keycloak realm] -->|JWKS endpoint| Dapr
+    Broker -. planned .-> Workflow[SPIFFE or Istio workflow identity contract]
 ```
 
 ## Runtime flows
 
-### A) Write flow: Keycloak callback -> cache
+### A) Current flow: authenticated session lifecycle
 
-1. User begins authentication from Slack/Teams interaction through external gateway.
-2. User authenticates in Google IdP via Keycloak.
-3. Keycloak calls Session Broker callback endpoint directly.
-4. Broker encrypts raw token set (access, refresh, ID token) and writes to Redis.
-5. Redis key is Slack user ID; TTL is taken from token `exp` claim.
-6. Broker emits audit log for write.
+1. Caller sends request to `/sessions` endpoints with bearer token.
+2. Dapr bearer middleware validates token signature and claims against Keycloak JWKS.
+3. Broker decodes claims (`sub`, `email`, `realm_access.roles`) for application logic.
+4. Broker reads/writes session documents in Redis through Dapr state APIs.
 
-### B) Read flow: event -> identity conversion
+### B) Planned flow: callback cache + identity resolve
 
-1. Chat event arrives with Slack user ID.
-2. Broker reads cached token set from Redis by Slack user ID.
-3. Broker verifies token is not expired (`exp` strict policy).
-4. Broker resolves effective authorization context.
-5. Broker returns workflow identity contract and mints/requests SPIFFE/Istio token if integrated.
-6. Broker emits audit log for read.
+1. Keycloak callback stores token set by channel identity key.
+2. Chat event calls identity resolution endpoint.
+3. Broker resolves auth context and returns workflow identity contract.
+
+## Sequence (current implementation)
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant D as Dapr Sidecar
+    participant B as Session Broker
+    participant R as Redis
+    participant K as Keycloak
+
+    C->>D: HTTP /sessions/* with Bearer token
+    D->>K: Validate token via JWKS
+    K-->>D: Validation result
+    D->>B: Forward authenticated request
+    B->>B: Decode claims from JWT payload
+    B->>D: State API read/write
+    D->>R: Persist/fetch session
+    R-->>D: Session payload
+    D-->>B: State result
+    B-->>C: Session response
+```
 
 ## Responsibilities
 
 | Layer | Responsibility |
 |---|---|
-| Keycloak | Authenticates users and sends callback payload to broker |
-| Dapr sidecar + state API | Service invocation and Redis abstraction |
-| FastAPI broker | Callback processing, token cache write/read, identity conversion contract |
-| Redis | Token cache keyed by Slack user ID with exp-based TTL |
-| Istio/SPIFFE | Workflow identity target consumed by downstream services |
+| Keycloak | Token issuer and JWKS source for Dapr bearer validation |
+| Dapr sidecar + state API | HTTP middleware validation and Redis abstraction |
+| FastAPI broker | Session create/read/update/handoff/terminate operations |
+| Redis | Session state storage keyed by session ID |
+| Istio/SPIFFE | Target integration for planned identity-conversion contract |
 | Argo CD | Delivers manifests from `gitops/` to the cluster |

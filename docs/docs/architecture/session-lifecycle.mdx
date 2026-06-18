@@ -4,7 +4,7 @@ sidebar_position: 3
 
 # Session Lifecycle
 
-A session ties a Keycloak user identity to one or more agent invocations. This page documents the lifecycle states and transitions.
+A session ties an authenticated Keycloak identity to one or more agent invocations. This page documents the currently implemented lifecycle.
 
 ## States
 
@@ -15,22 +15,17 @@ A session ties a Keycloak user identity to one or more agent invocations. This p
 
 ## Lifecycle transitions
 
+```mermaid
+stateDiagram-v2
+  [*] --> active: POST /sessions
+  active --> active: PATCH /sessions/{id}\n(update state/current_agent)
+  active --> active: POST /sessions/{id}/handoff\n(change current_agent)
+  active --> terminated: DELETE /sessions/{id}
+  terminated --> terminated: GET /sessions/{id}
+  terminated --> terminated: PATCH /sessions/{id}\n(current implementation allows mutation)
 ```
-                   POST /sessions
-                        │
-                        ▼
-                    [ active ]
-                   /          \
-  PATCH /sessions/{id}     POST /sessions/{id}/handoff
-  (update state)           (change current_agent)
-                   \          /
-                    [ active ]
-                        │
-             DELETE /sessions/{id}
-                        │
-                        ▼
-                 [ terminated ]
-```
+
+> Note: `DELETE /sessions/{id}` is a logical terminate operation. The record remains in Redis with `status = terminated`.
 
 ## Session object
 
@@ -49,6 +44,12 @@ A session ties a Keycloak user identity to one or more agent invocations. This p
 ```
 
 `state` is a free-form JSON object that agents use to pass context between each other during handoffs.
+
+Identity fields are derived from JWT claims as follows:
+
+- `user_id` from `sub`
+- `user_email` from `email`
+- `roles` from `realm_access.roles`
 
 ## Handoff pattern
 

@@ -4,7 +4,15 @@ sidebar_position: 1
 
 # Token Broker API
 
-This API captures the two primary broker operations:
+This page captures the **target token-broker contract**.
+
+:::warning Implementation status
+These endpoints are **not implemented yet** in the current FastAPI service.
+
+Current implemented endpoints are documented in [Session Lifecycle API](./sessions).
+:::
+
+When implemented, this API will provide two primary operations:
 
 1. Write operation: store authenticated token material after Keycloak callback.
 2. Read operation: resolve cached token data and return workflow identity contract for Agent/MCP calls.
@@ -15,6 +23,7 @@ This API captures the two primary broker operations:
 - Token material stored encrypted in Redis.
 - TTL policy: strict `exp` claim.
 - Every read/write emits an audit log event.
+- Raw token values are never returned in responses.
 
 ## 1) Write endpoint: Keycloak callback cache
 
