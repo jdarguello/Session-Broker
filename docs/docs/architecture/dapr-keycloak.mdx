@@ -1,0 +1,83 @@
+---
+sidebar_position: 2
+---
+
+# Dapr + Keycloak Integration
+
+Session Broker leverages Dapr's HTTP middleware pipeline to offload JWT validation entirely to the sidecar. This means the FastAPI service contains **zero auth-validation code**.
+
+## How it works
+
+### 1. Bearer middleware component
+
+`gitops/session-broker/base/dapr-bearer-middleware.yaml` registers a Dapr component of type `middleware.http.bearer`:
+
+```yaml
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: keycloak-validator
+  namespace: session-broker
+spec:
+  type: middleware.http.bearer
+  version: v1
+  metadata:
+    - name: jwksURL
+      value: "http://keycloak.keycloak.svc.cluster.local/realms/session-broker/protocol/openid-connect/certs"
+    - name: audience
+      value: "session-broker-client"
+    - name: issuer
+      value: "http://keycloak.keycloak.svc.cluster.local/realms/session-broker"
+```
+
+### 2. Dapr Configuration applies the middleware
+
+`gitops/session-broker/base/dapr-configuration.yaml` wires the middleware into the HTTP pipeline for the `session-broker` app-id:
+
+```yaml
+apiVersion: dapr.io/v1alpha1
+kind: Configuration
+metadata:
+  name: keycloak-config
+  namespace: session-broker
+spec:
+  httpPipeline:
+    handlers:
+      - name: keycloak-validator
+        type: middleware.http.bearer
+```
+
+The Deployment annotation `dapr.io/config: "keycloak-config"` connects the pod to this configuration.
+
+### 3. Claim extraction in the service
+
+Because Dapr has already validated the token, the service only needs to **decode** (not verify) the JWT payload:
+
+```python
+def extract_claims(request: Request) -> dict:
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return {}
+    token = auth[len("Bearer "):]
+    payload = token.split(".")[1]
+    payload += "=" * (-len(payload) % 4)
+    return json.loads(base64.urlsafe_b64decode(payload))
+```
+
+The returned claims include `sub` (user ID), `email`, and `realm_access.roles`.
+
+## Keycloak realm setup
+
+After Keycloak is deployed, configure the following (can be scripted via the Admin REST API):
+
+| Setting | Value |
+|---|---|
+| Realm | `session-broker` |
+| Client ID | `session-broker-client` |
+| Client authentication | Disabled (public client for agents) |
+| Valid redirect URIs | (set per agent if using authorization code flow) |
+
+Keycloak's JWKS endpoint will be available at:
+```
+http://keycloak.keycloak.svc.cluster.local/realms/session-broker/protocol/openid-connect/certs
+```

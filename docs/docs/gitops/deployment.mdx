@@ -1,0 +1,63 @@
+---
+sidebar_position: 2
+---
+
+# Bootstrapping the Cluster
+
+This page describes how to bring up a fresh cluster with all Session Broker dependencies deployed via Argo CD.
+
+## Prerequisites
+
+- `kubectl` connected to the target cluster
+- Argo CD installed in the `argocd` namespace ([installation docs](https://argo-cd.readthedocs.io/en/stable/getting_started/))
+- Secrets created before syncing (see below)
+
+## Required secrets
+
+Create these Kubernetes secrets before Argo CD syncs the apps:
+
+```bash
+# Redis password (referenced by both the Redis chart and the Dapr state store component)
+kubectl create secret generic redis-secret \
+  --from-literal=redis-password=<your-password> \
+  -n redis --dry-run=client -o yaml | kubectl apply -f -
+
+# Copy the secret into session-broker namespace for the Dapr component
+kubectl create secret generic redis-secret \
+  --from-literal=redis-password=<your-password> \
+  -n session-broker --dry-run=client -o yaml | kubectl apply -f -
+
+# Keycloak admin password
+kubectl create secret generic keycloak-admin-secret \
+  --from-literal=admin-password=<your-password> \
+  -n keycloak --dry-run=client -o yaml | kubectl apply -f -
+```
+
+## Bootstrap the root app
+
+```bash
+kubectl apply -f gitops/apps/root-app.yaml
+```
+
+Argo CD will discover and sync all child Applications (`dapr`, `keycloak`, `redis`, `session-broker`) in dependency order.
+
+## Verify
+
+```bash
+argocd app list
+kubectl get pods -n session-broker
+kubectl get pods -n dapr-system
+kubectl get pods -n keycloak
+kubectl get pods -n redis
+```
+
+## Keycloak realm setup
+
+After Keycloak is running, create the realm and client via the Admin UI or the REST API:
+
+1. Navigate to the Keycloak admin console
+2. Create realm: `session-broker`
+3. Create client: `session-broker-client` (public, no client authentication)
+4. Create a test user and assign roles
+
+The Dapr bearer middleware will start validating tokens against the realm's JWKS endpoint automatically.

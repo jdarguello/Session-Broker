@@ -1,0 +1,45 @@
+---
+sidebar_position: 1
+---
+
+# Architecture Overview
+
+Session Broker is a single-responsibility microservice deployed as a Kubernetes workload with a Dapr sidecar. All external traffic flows through the sidecar, which handles JWT validation and state store communication.
+
+## Component diagram
+
+```
+                        ┌─────────────────────────────────────┐
+                        │            Kubernetes Cluster         │
+                        │                                       │
+  AI Agent / Client ───▶│  Dapr sidecar  ──▶  FastAPI app      │
+  (Bearer JWT)          │      │                    │           │
+                        │      │ validate            │ decode    │
+                        │      ▼                    │ claims    │
+                        │  Keycloak JWKS            │           │
+                        │                           ▼           │
+                        │              Dapr state API           │
+                        │                    │                  │
+                        │                    ▼                  │
+                        │                 Redis                 │
+                        └─────────────────────────────────────┘
+```
+
+## Runtime flow
+
+1. A client (agent, MCP server, or orchestrator) obtains a JWT from Keycloak and attaches it as a `Bearer` token.
+2. The **Dapr sidecar** receives the request and applies the `keycloak-validator` bearer middleware, which fetches and caches the JWKS from Keycloak to verify the token signature, expiry, audience, and issuer.
+3. If validation succeeds, the sidecar forwards the original request (with the `Authorization` header intact) to the **FastAPI app** on port `8000`.
+4. The FastAPI app decodes the JWT payload (base64, no signature check needed) to extract `sub`, `email`, and `realm_access.roles`.
+5. Session CRUD operations are performed by posting to `http://localhost:3500/v1.0/state/redis` — the Dapr state API — which proxies to Redis.
+
+## Responsibilities
+
+| Layer | Responsibility |
+|---|---|
+| Keycloak | Issues signed JWTs; exposes JWKS endpoint |
+| Dapr bearer middleware | Validates JWT on every inbound request |
+| FastAPI app | Business logic: session lifecycle, identity extraction |
+| Dapr state API | Abstracts Redis; app never connects to Redis directly |
+| Redis | Durable session store |
+| Argo CD | Delivers manifests from `gitops/` to the cluster |

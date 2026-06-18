@@ -2,46 +2,44 @@
 sidebar_position: 1
 ---
 
-# Tutorial Intro
+# Introduction
 
-Let's discover **Docusaurus in less than 5 minutes**.
+**Session Broker** is a cloud-native microservice for AI agent orchestration. It tracks user identities and session state across Agent and MCP (Model Context Protocol) invocations, acting as the authoritative source of truth for who is in a session and which agent owns it at any point in time.
 
-## Getting Started
+## What it does
 
-Get started by **creating a new site**.
+- **Creates sessions** — binds a Keycloak-authenticated user identity to a new agent session
+- **Maintains state** — stores arbitrary session payload in Redis via the Dapr state store API
+- **Hands off sessions** — transfers ownership of a session from one agent to another
+- **Terminates sessions** — marks sessions as terminated when the interaction is complete
 
-Or **try Docusaurus immediately** with **[docusaurus.new](https://docusaurus.new)**.
+## Core integrations
 
-### What you'll need
+| Component | Role |
+|---|---|
+| **Dapr sidecar** | Service invocation transport, Redis state store abstraction, JWT bearer middleware |
+| **Keycloak** | Identity provider — issues JWTs validated by Dapr before requests reach the service |
+| **Redis** | Persistent session store (accessed exclusively through the Dapr state API) |
+| **Argo CD** | GitOps delivery — app-of-apps pattern drives all deployments |
 
-- [Node.js](https://nodejs.org/en/download/) version 20.0 or above:
-  - When installing Node.js, you are recommended to check all checkboxes related to dependencies.
+## How authentication works
 
-## Generate a new site
+Dapr's `middleware.http.bearer` component intercepts every inbound HTTP request and validates the JWT signature and expiry against Keycloak's JWKS endpoint. Only requests carrying a valid token reach the FastAPI application. The service itself never calls Keycloak — it simply decodes the already-validated JWT payload to extract identity claims (`sub`, `email`, `realm_access.roles`).
 
-Generate a new Docusaurus site using the **classic template**.
-
-The classic template will automatically be added to your project after you run the command:
-
-```bash
-npm init docusaurus@latest my-website classic
+```
+Client ──Bearer JWT──▶ Dapr sidecar ──validates──▶ Keycloak JWKS
+                              │
+                              │ (valid token forwarded)
+                              ▼
+                       FastAPI app (decodes claims, no re-validation)
 ```
 
-You can type this command into Command Prompt, Powershell, Terminal, or any other integrated terminal of your code editor.
+## Repository layout
 
-The command also installs all necessary dependencies you need to run Docusaurus.
-
-## Start your site
-
-Run the development server:
-
-```bash
-cd my-website
-npm run start
+```
+src/          Python + FastAPI service
+gitops/       Kubernetes manifests (Kustomize + Helm, managed by Argo CD)
+docs/         This documentation site (Docusaurus, deployed to GitHub Pages)
 ```
 
-The `cd` command changes the directory you're working with. In order to work with your newly created Docusaurus site, you'll need to navigate the terminal there.
-
-The `npm run start` command builds your website locally and serves it through a development server, ready for you to view at http://localhost:3000/.
-
-Open `docs/intro.md` (this page) and edit some lines: the site **reloads automatically** and displays your changes.
+Browse the sidebar to explore the [Architecture](./architecture/overview), [API Reference](./api/sessions), [GitOps](./gitops/overview), and [Local Development](./development/local-setup) sections.

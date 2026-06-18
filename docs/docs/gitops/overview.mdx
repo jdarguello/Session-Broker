@@ -1,0 +1,73 @@
+---
+sidebar_position: 1
+---
+
+# GitOps Overview
+
+All Kubernetes infrastructure is managed declaratively through the `gitops/` directory and delivered by **Argo CD** using the **app-of-apps** pattern.
+
+## Directory structure
+
+```
+gitops/
+  apps/                        ← Argo CD Application manifests
+    root-app.yaml              ← Root app (syncs this folder)
+    session-broker.yaml        ← Kustomize overlay for the service
+    dapr.yaml                  ← Dapr Helm chart
+    keycloak.yaml              ← Bitnami Keycloak Helm chart
+    redis.yaml                 ← Bitnami Redis Helm chart
+
+  session-broker/
+    base/                      ← Shared K8s manifests
+      deployment.yaml
+      service.yaml
+      serviceaccount.yaml
+      dapr-statestore.yaml     ← Dapr Component: state.redis
+      dapr-bearer-middleware.yaml  ← Dapr Component: middleware.http.bearer
+      dapr-configuration.yaml  ← Dapr Configuration (HTTP pipeline)
+      kustomization.yaml
+    overlays/
+      dev/                     ← 1 replica, low resources, latest image tag
+      prod/                    ← 3 replicas, higher resources, pinned image tag
+
+  dapr/values.yaml             ← Helm values for Dapr
+  keycloak/values.yaml         ← Helm values for Bitnami Keycloak
+  redis/values.yaml            ← Helm values for Bitnami Redis
+```
+
+## App-of-apps pattern
+
+```
+Argo CD
+  └── root-app  (watches gitops/apps/)
+        ├── session-broker  ──▶ gitops/session-broker/overlays/dev
+        ├── dapr            ──▶ dapr/dapr Helm chart
+        ├── keycloak        ──▶ bitnami/keycloak Helm chart
+        └── redis           ──▶ bitnami/redis Helm chart
+```
+
+The root Application is bootstrapped once manually (or via `kubectl apply`). After that, every change pushed to `main` is picked up by Argo CD automatically.
+
+## Namespaces
+
+| Workload | Namespace |
+|---|---|
+| Session Broker | `session-broker` |
+| Dapr control plane | `dapr-system` |
+| Keycloak | `keycloak` |
+| Redis | `redis` |
+| Argo CD | `argocd` |
+
+## Overlays
+
+The `dev` overlay uses:
+- `replicas: 1`
+- Lower CPU/memory limits
+- `image tag: latest`
+
+The `prod` overlay uses:
+- `replicas: 3`
+- Higher CPU/memory limits
+- Pinned image tag (e.g. `1.0.0`)
+
+To promote to production, update the image tag in `gitops/session-broker/overlays/prod/kustomization.yaml` and push. Argo CD detects the drift and reconciles.

@@ -1,0 +1,8 @@
+{
+  "label": "GitOps & Deployment",
+  "position": 4,
+  "link": {
+    "type": "generated-index",
+    "description": "How Session Broker and its dependencies are delivered to Kubernetes using Argo CD."
+  }
+}

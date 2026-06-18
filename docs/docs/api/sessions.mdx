@@ -1,0 +1,112 @@
+---
+sidebar_position: 1
+---
+
+# Sessions API
+
+All endpoints require a valid Keycloak JWT in the `Authorization: Bearer <token>` header. Dapr validates the token before the request reaches the service.
+
+Base path: `/sessions`
+
+The interactive API docs (Swagger UI) are available at `http://localhost:8000/docs` when running locally.
+
+---
+
+## POST /sessions
+
+Create a new session for the authenticated user.
+
+**Request body**
+
+```json
+{
+  "agent": "agent-alpha",
+  "state": {}
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `agent` | string | ✅ | Name of the agent that initially owns the session |
+| `state` | object | ❌ | Optional initial state payload |
+
+**Response** `201 Created`
+
+```json
+{
+  "id": "3f7a1b2c-4d5e-6f7a-8b9c-0d1e2f3a4b5c",
+  "user_id": "keycloak-sub-value",
+  "user_email": "user@example.com",
+  "roles": ["agent-user"],
+  "current_agent": "agent-alpha",
+  "state": {},
+  "status": "active",
+  "created_at": "2026-06-18T10:00:00Z",
+  "updated_at": "2026-06-18T10:00:00Z"
+}
+```
+
+---
+
+## `GET /sessions/{session_id}`
+
+Retrieve a session by ID.
+
+**Response** `200 OK` — session object (same shape as above)
+
+**Response** `404 Not Found` — if the session does not exist
+
+---
+
+## `PATCH /sessions/{session_id}`
+
+Update the session state or current agent.
+
+**Request body** (all fields optional)
+
+```json
+{
+  "state": { "last_intent": "book-flight" },
+  "current_agent": "agent-beta"
+}
+```
+
+**Response** `200 OK` — updated session object
+
+---
+
+## `POST /sessions/{session_id}/handoff`
+
+Transfer session ownership to another agent.
+
+**Request body**
+
+```json
+{
+  "target_agent": "agent-beta"
+}
+```
+
+**Response** `200 OK` — updated session object with new `current_agent`
+
+---
+
+## `DELETE /sessions/{session_id}`
+
+Terminate a session. Sets `status` to `terminated`.
+
+**Response** `204 No Content`
+
+**Response** `404 Not Found` — if the session does not exist
+
+---
+
+## GET /health
+
+Liveness/readiness probe.
+
+**Response** `200 OK`
+
+```json
+{ "status": "ok" }
+```

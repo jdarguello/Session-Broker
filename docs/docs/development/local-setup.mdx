@@ -1,0 +1,103 @@
+---
+sidebar_position: 1
+---
+
+# Local Development
+
+## Prerequisites
+
+- Python 3.12+
+- [Dapr CLI](https://docs.dapr.io/getting-started/install-dapr-cli/) (optional, for running with sidecar locally)
+- Docker (optional, for Redis)
+
+## Install dependencies
+
+```bash
+cd src
+pip install -r requirements.txt
+```
+
+## Run without Dapr (dev / unit testing)
+
+In this mode the app runs standalone. JWT validation is skipped by Dapr (not present), but the `extract_claims` helper still parses any Bearer token you provide.
+
+```bash
+cd src
+uvicorn app.main:app --reload
+```
+
+The API is available at `http://localhost:8000`.  
+Interactive docs (Swagger UI): `http://localhost:8000/docs`
+
+## Run with Dapr sidecar
+
+Start a local Redis instance:
+
+```bash
+docker run -d -p 6379:6379 redis:7
+```
+
+Run the app through the Dapr CLI (JWT validation active):
+
+```bash
+dapr run \
+  --app-id session-broker \
+  --app-port 8000 \
+  --dapr-http-port 3500 \
+  --resources-path ./dapr-local/ \
+  -- uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+Create a `src/dapr-local/` folder with a local state store component:
+
+```yaml
+# src/dapr-local/redis-statestore.yaml
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: redis
+spec:
+  type: state.redis
+  version: v1
+  metadata:
+    - name: redisHost
+      value: "localhost:6379"
+    - name: redisPassword
+      value: ""
+```
+
+## Run tests
+
+```bash
+cd src
+pytest
+```
+
+Tests mock the Dapr state API (`_dapr_save` / `_dapr_get`) so no Redis or Dapr installation is needed.
+
+## Lint
+
+```bash
+cd src
+ruff check app/
+```
+
+## Project structure reference
+
+```
+src/
+  app/
+    main.py                  FastAPI application entry point
+    routers/
+      health.py              GET /health
+      sessions.py            CRUD + handoff endpoints
+    models/
+      session.py             Pydantic models (Session, requests)
+    services/
+      auth.py                JWT claim extraction (no verification)
+      session_service.py     Dapr state store CRUD
+  tests/
+    test_sessions.py         Unit tests
+  Dockerfile
+  requirements.txt
+```

@@ -11,32 +11,35 @@ type FeatureItem = {
 
 const FeatureList: FeatureItem[] = [
   {
-    title: 'Easy to Use',
+    title: 'Identity-Aware Sessions',
     Svg: require('@site/static/img/undraw_docusaurus_mountain.svg').default,
     description: (
       <>
-        Docusaurus was designed from the ground up to be easily installed and
-        used to get your website up and running quickly.
+        Every session is bound to a Keycloak user identity. JWT claims (<code>sub</code>,
+        <code>email</code>, <code>roles</code>) are extracted on every request — no
+        separate user lookup needed.
       </>
     ),
   },
   {
-    title: 'Focus on What Matters',
+    title: 'Zero-Trust via Dapr',
     Svg: require('@site/static/img/undraw_docusaurus_tree.svg').default,
     description: (
       <>
-        Docusaurus lets you focus on your docs, and we&apos;ll do the chores. Go
-        ahead and move your docs into the <code>docs</code> directory.
+        Dapr&apos;s bearer middleware validates every inbound JWT against Keycloak&apos;s
+        JWKS endpoint before the request reaches the service. Your business logic
+        never handles raw token verification.
       </>
     ),
   },
   {
-    title: 'Powered by React',
+    title: 'GitOps-Delivered',
     Svg: require('@site/static/img/undraw_docusaurus_react.svg').default,
     description: (
       <>
-        Extend or customize your website layout by reusing React. Docusaurus can
-        be extended while reusing the same header and footer.
+        All infrastructure — Dapr, Keycloak, Redis, and the broker itself — is
+        declared in <code>gitops/</code> and continuously delivered to Kubernetes
+        by Argo CD using the app-of-apps pattern.
       </>
     ),
   },

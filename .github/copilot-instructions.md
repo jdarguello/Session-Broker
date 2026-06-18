@@ -97,6 +97,7 @@ gitops/       # Kubernetes / GitOps manifests
 
 ## Git Workflow
 
+- **Before every `git push`**: update `docs/` to reflect any code or infrastructure changes made in that task — this is mandatory, not optional.
 - After every task that involves code changes, stage all modified/new files, commit with a descriptive message, and push to `origin main` immediately
 - Use conventional commit prefixes: `feat:`, `fix:`, `docs:`, `chore:`, etc.
 - Never leave uncommitted changes after completing a task
