@@ -45,3 +45,9 @@ gitops/       # Kubernetes / GitOps manifests
 - Discuss architecture and language/framework choices before writing code
 - Keep the deployment target (Kubernetes) in mind for all design decisions
 - Prefer cloud-native, observable, and operationally simple solutions
+
+## Git Workflow
+
+- After every task that involves code changes, stage all modified/new files, commit with a descriptive message, and push to `origin main` immediately
+- Use conventional commit prefixes: `feat:`, `fix:`, `docs:`, `chore:`, etc.
+- Never leave uncommitted changes after completing a task
