@@ -144,6 +144,7 @@ gitops/       # Kubernetes / GitOps manifests
 
 ## Agent Behavior
 
+- Edit any file without asking for permission. Do not pause to confirm edits unless I explicitly say I want to review your work first.
 - Execute terminal commands freely without asking for confirmation, **except** for operations that delete files, folders, or content (those require explicit approval)
 - Trust your judgment for installs, builds, edits, and git operations
 
