@@ -6,6 +6,23 @@ sidebar_position: 2
 
 This page describes how to bring up a fresh cluster with all Session Broker dependencies deployed via Argo CD.
 
+## Container image (CI)
+
+The session-broker image is built and published to the **GitHub Container Registry (GHCR)** by the
+[`deploy-image.yml`](https://github.com/jdarguello/Session-Broker/blob/main/.github/workflows/deploy-image.yml)
+workflow. It runs on pushes to `main` that touch `src/**` (and on manual `workflow_dispatch`).
+
+- **Image:** `ghcr.io/jdarguello/session-broker`
+- **Tags:** `latest` and `sha-<commit>` (immutable, for pinning)
+- **Auth:** the built-in `GITHUB_TOKEN` (`packages: write`) — no extra secrets to configure
+- **Build context:** `src/` (uses `src/Dockerfile`), with GitHub Actions layer caching
+
+The GitOps manifests reference this image: the `base` deployment pins `:latest`, while the `dev` and
+`prod` overlays override the tag via Kustomize `images:` (dev → `latest`, prod → a pinned release tag).
+
+> The GHCR package must be **public**, or the cluster needs an `imagePullSecret` for `ghcr.io`,
+> otherwise the kubelet cannot pull the image.
+
 ## Prerequisites
 
 - `kubectl` connected to the target cluster
