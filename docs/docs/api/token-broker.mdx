@@ -4,10 +4,11 @@ sidebar_position: 1
 
 # Token Broker API
 
-The token broker is the primary API surface of this service. It provides two operations:
+The token broker exposes three primary endpoints. The **OAuth Authorization-Code write path** is the demo-canonical flow; the old trusted-cache endpoint is retained only as a test shim.
 
-1. **Write** — store encrypted token material after a Keycloak callback.
-2. **Read** — resolve cached token data and return the user's access token plus identity claims to the caller.
+1. **`POST /auth/login/start`** — initiate OAuth login; returns the Keycloak authorize URL (internal-only).
+2. **`GET /auth/callback`** — Keycloak redirects the user's browser here after authentication; the broker completes the three-step write (identify → exchange → store).
+3. **`POST /identity/resolve`** — read path; returns the user's access token + identity claims to the caller.
 
 ## Security and policy
 
@@ -15,56 +16,142 @@ The token broker is the primary API surface of this service. It provides two ope
 - Tokens stored **AES-256-GCM encrypted** in Redis via Dapr.
 - TTL derived strictly from the access token `exp` claim.
 - Every read/write emits a structured audit log event. Raw token values are **never** returned in responses or logs.
+- The nonce stored on `login/start` is **single-use** — deleted on first read at the callback; replayed `state` values are rejected.
 
 ---
 
-## 1) Write — Keycloak callback cache
+## Required configuration — write path
+
+The OAuth Authorization-Code write path requires the following to be in place before it functions:
+
+| Config item | Value / source |
+|---|---|
+| Keycloak client ID | `session-broker` (confidential client) |
+| Keycloak client secret | K8s Secret `keycloak-client-secret`, key `client_secret` |
+| Registered `redirect_uri` | `https://<alb-hostname>/auth/callback` |
+| Keycloak scopes | `openid email profile offline_access` |
+| PKCE method | `S256` |
+| Keycloak realm | `session-broker` |
+
+:::warning AWS ALB prerequisite
+The user's browser is redirected to `GET /auth/callback`, so the broker's write path must be reachable from the internet via the **AWS ALB Ingress**. The current local kubeadm-in-UTM cluster has no ingress controller, so the ALB Ingress address is only available on an AWS-backed cluster. Track this as a demo prerequisite.
+:::
+
+---
+
+## 1) Initiate OAuth login — `POST /auth/login/start`
+
+:::note Internal-only
+This endpoint is called by the EnterpriseClaw gateway (not by end users). It is not browser-reachable and must not be exposed via ingress.
+:::
+
+An agent hits an authorization wall and needs the user to log in. The gateway calls this endpoint to start the OAuth Authorization-Code flow.
 
 ### REST
 
 ```
-POST /auth/callback/cache
+POST /auth/login/start
+Content-Type: application/json
 ```
 
 **Request body**
 
 ```json
 {
-  "slack_user_id": "U07ABC123",
-  "access_token": "<keycloak-access-jwt>",
-  "refresh_token": "<keycloak-refresh-token>",
-  "id_token": "<keycloak-id-jwt>"
+  "slack_user_id": "U07ABC123"
 }
 ```
 
 | Field | Required | Description |
 |---|---|---|
-| `slack_user_id` | ✅ | Primary cache key |
-| `access_token` | ✅ | Keycloak access token (JWT). TTL is derived from its `exp` claim. |
-| `refresh_token` | ✅ | Keycloak refresh token |
-| `id_token` | ✅ | Keycloak ID token (JWT) |
+| `slack_user_id` | ✅ | Slack user ID for the user who needs to authenticate |
+
+**What the broker does**
+
+1. Mints a one-time opaque `state` nonce.
+2. Generates a PKCE `code_verifier` (random, high-entropy).
+3. Stores `login:{nonce} → { slack_user_id, code_verifier }` in Redis with a ~5 min TTL.
+4. Builds and returns the Keycloak `/authorize` URL with `state={nonce}`, `code_challenge` (S256 of the verifier), and the required scopes.
 
 **Response 200**
 
 ```json
 {
-  "cached": true,
-  "slack_user_id": "U07ABC123"
+  "authorize_url": "https://keycloak.example.com/realms/session-broker/protocol/openid-connect/auth?client_id=session-broker&redirect_uri=https%3A%2F%2F...&response_type=code&scope=openid+email+profile+offline_access&state=<nonce>&code_challenge=<s256>&code_challenge_method=S256",
+  "state": "<nonce>"
 }
 ```
 
-**Response 422** — missing required fields.
+The agent posts the `authorize_url` to the user in Slack. The user's browser opens the URL, authenticates via Google → Keycloak, and Keycloak redirects back to the registered `redirect_uri` (the broker callback).
+
+**Response 422** — missing or invalid `slack_user_id`.
 
 ### Dapr service invocation
 
 ```http
-POST /v1.0/invoke/session-broker/method/auth/callback/cache
+POST /v1.0/invoke/session-broker/method/auth/login/start
 Content-Type: application/json
 ```
 
 ---
 
-## 2) Read — resolve identity & return access token
+## 2) OAuth callback — `GET /auth/callback`
+
+The user's browser arrives here after Keycloak authentication. The broker runs three internal steps and then redirects the user to a success page (or returns 400/500 on failure).
+
+:::note Browser-reachable via the AWS ALB Ingress
+This endpoint must be registered as the `redirect_uri` in the Keycloak confidential client. It is the only write-path endpoint that is internet-exposed.
+:::
+
+### Request
+
+```
+GET /auth/callback?code=<authorization-code>&state=<nonce>
+```
+
+| Query parameter | Required | Description |
+|---|---|---|
+| `code` | ✅ | Authorization code issued by Keycloak |
+| `state` | ✅ | The nonce minted by `POST /auth/login/start` |
+
+### Three internal steps
+
+**(1) Identify** — The broker looks up `login:{state}` in Redis and **deletes it immediately** (single-use). This recovers `slack_user_id` and `code_verifier`. If the nonce is missing or expired the request is rejected with 400.
+
+**(2) Exchange** — The broker POSTs to Keycloak's token endpoint:
+
+```http
+POST /realms/session-broker/protocol/openid-connect/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=authorization_code
+&code=<authorization-code>
+&client_id=session-broker
+&client_secret=<from K8s Secret>
+&redirect_uri=https://<alb-hostname>/auth/callback
+&code_verifier=<recovered from nonce store>
+```
+
+Keycloak returns `access_token`, `refresh_token`, and `id_token`. Token provenance is guaranteed — the broker never trusts raw tokens supplied by a caller.
+
+**(3) Store** — The broker encrypts the token set (AES-256-GCM) and persists it in Redis keyed by `slack:{slack_user_id}` with a TTL derived from the access token `exp` claim. An audit log event is emitted.
+
+### Response
+
+| Outcome | HTTP status |
+|---|---|
+| Success | 302 redirect to success page (or 200 JSON in non-browser contexts) |
+| Invalid / expired nonce | 400 |
+| Keycloak token exchange failure | 502 |
+| Internal error | 500 |
+
+:::note This endpoint supersedes `POST /auth/callback/cache`
+The old trusted-cache endpoint is retained only as a test shim — see below. Do not use it in the demo flow.
+:::
+
+---
+
+## 3) Read — resolve identity and return access token
 
 ### REST
 
@@ -80,6 +167,14 @@ POST /identity/resolve
 
 No request body is required.
 
+**What the broker does**
+
+Looks up `slack:{slack_user_id}` in Redis, decrypts the token set, validates the `exp` claim (rejects expired material), and returns the access token alongside identity claims extracted from the ID token.
+
+:::note The reader never contacts Keycloak
+The read path is intentionally Keycloak-free. It resolves only from the Redis cache. This is a security property: the reader has no reason to hold Keycloak credentials.
+:::
+
 **Response 200 — authenticated**
 
 ```json
@@ -93,6 +188,8 @@ No request body is required.
 }
 ```
 
+The caller attaches `access_token` as a `Bearer` token when invoking downstream agents on behalf of the user.
+
 **Response 200 — unauthenticated** (no cached token found)
 
 ```json
@@ -104,7 +201,7 @@ No request body is required.
 
 **Response 400** — `X-Slack-User-Id` header missing.
 
-**Response 401** — cached token has expired; re-authentication required.
+**Response 401** — cached token has expired; the user must re-authenticate via `POST /auth/login/start`.
 
 ### Dapr service invocation
 
@@ -115,9 +212,11 @@ X-Slack-User-Id: U07ABC123
 
 ---
 
-## 3) Health endpoint
+## 4) Health endpoint
 
-`GET /health`
+```
+GET /health
+```
 
 ```json
 { "status": "ok" }
@@ -125,8 +224,50 @@ X-Slack-User-Id: U07ABC123
 
 ---
 
-## Notes
+## RETAINED TEST SHIM — `POST /auth/callback/cache`
 
-- Auth URL generation remains outside this broker.
-- Broker does not own unauthenticated pre-session creation.
-- Broker should never return raw cached tokens to callers.
+:::warning Superseded — not the demo flow
+This endpoint accepts raw token material from the caller and caches it directly. It exists **only** as a scripted test shim for CI and local integration tests. It is **not** used in the demo OAuth flow and must be **removed at go-live**. Do not present it as the primary write path.
+:::
+
+```
+POST /auth/callback/cache
+Content-Type: application/json
+```
+
+**Request body**
+
+```json
+{
+  "slack_user_id": "U07ABC123",
+  "access_token": "<keycloak-access-jwt>",
+  "refresh_token": "<keycloak-refresh-token>",
+  "id_token": "<keycloak-id-jwt>"
+}
+```
+
+**Response 200**
+
+```json
+{
+  "cached": true,
+  "slack_user_id": "U07ABC123"
+}
+```
+
+### Dapr service invocation
+
+```http
+POST /v1.0/invoke/session-broker/method/auth/callback/cache
+Content-Type: application/json
+```
+
+---
+
+## Deferred to hardening
+
+The following are **not implemented in the demo**:
+
+- **Email cross-check at callback** — verify the Keycloak token's `email` claim matches the Slack user's corporate email before caching. Backstop against identity-injection on `login/start`.
+- **Writer/reader split** — separate Deployments, service accounts, and Redis ACL users for the write and read paths.
+- **Refresh-token usage** — broker refreshing an expired access token on the read path. Design tension unresolved: the reader must not contact Keycloak.
