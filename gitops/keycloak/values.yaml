@@ -45,5 +45,30 @@ service:
 ingress:
   enabled: false  # enable and configure for external access
 
-# Keycloak realm / client bootstrap is handled out-of-band via the Keycloak Admin API
-# or a separate Job after the chart is deployed.
+# ---------------------------------------------------------------------------
+# Realm / client bootstrap — MANUAL STEP, out-of-band after chart deploy
+# ---------------------------------------------------------------------------
+# The Bitnami Keycloak chart does not support declarative realm-client
+# configuration via Helm values, so the broker's confidential client must be
+# registered manually (or via a post-deploy Keycloak Admin API call / realm
+# import Job).  Required settings for the ArgoCon demo:
+#
+#   Realm:          enterpriseclaw
+#   Client ID:      session-broker
+#   Client type:    confidential (OpenID Connect)
+#   Client secret:  generated at registration; store in the "session-broker-secret"
+#                   K8s Secret under key "keycloak-client-secret" (provisioned
+#                   out-of-band, same pattern as keycloak-admin-secret —
+#                   do NOT commit the plaintext secret here)
+#   Standard flow:  enabled  (Authorization Code)
+#   Direct access:  disabled
+#   PKCE algorithm: S256  (Proof Key for Code Exchange — required)
+#   Redirect URI:   https://broker.session-broker.example.com/auth/callback
+#   Scopes:         openid, email, profile, offline_access
+#                   (offline_access issues a refresh token — required for the
+#                    demo token-storage contract)
+#
+# Google Workspace federation: configure a "google" Identity Provider in the
+# "enterpriseclaw" realm pointing at the Google OAuth 2.0 endpoints for your
+# Workspace domain. Keycloak is the only IdP the broker's code ever calls;
+# Google is Keycloak's upstream, transparent to the broker.

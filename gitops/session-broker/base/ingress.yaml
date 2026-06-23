@@ -1,0 +1,35 @@
+# AWS ALB Ingress for the session-broker OAuth callback.
+#
+# ⚠️  DEMO PREREQUISITE: This Ingress only resolves on an AWS-backed cluster
+# running the AWS Load Balancer Controller. The local kubeadm-in-UTM cluster
+# has no ingress controller, so this manifest will be accepted by the API server
+# but will not produce an address there. This is a known demo prerequisite, not
+# a bug in the manifest.
+#
+# The callback path /auth/callback must be browser-reachable because Keycloak
+# redirects the user's browser to it after authentication. /auth/login/start is
+# internal-only (called by the EnterpriseClaw gateway, not a browser) and is
+# intentionally NOT exposed here.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: session-broker-callback
+  namespace: session-broker
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+spec:
+  ingressClassName: alb
+  rules:
+    - host: broker.session-broker.example.com
+      http:
+        paths:
+          - path: /auth/callback
+            pathType: Exact
+            backend:
+              service:
+                name: session-broker
+                port:
+                  number: 80

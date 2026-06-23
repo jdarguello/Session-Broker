@@ -7,6 +7,7 @@ resources:
   - serviceaccount.yaml
   - deployment.yaml
   - service.yaml
+  - ingress.yaml
   - dapr-statestore.yaml
   # dapr-bearer-middleware.yaml excluded for demo: bearer validation removed
   # from the global pipeline (see dapr-configuration.yaml). Re-include at
