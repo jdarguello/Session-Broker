@@ -4,7 +4,10 @@ metadata:
   name: keycloak-config
   namespace: session-broker
 spec:
+  # Demo scope: bearer middleware removed from the global httpPipeline so that
+  # POST /auth/callback/cache (trusted write path) and POST /identity/resolve
+  # (reader path) are not gated by Keycloak bearer validation. The reader must
+  # never be forced to contact Keycloak. Re-add per-route auth at go-live when
+  # the writer/reader split and scoped middleware are implemented.
   httpPipeline:
-    handlers:
-      - name: keycloak-validator
-        type: middleware.http.bearer
+    handlers: []
