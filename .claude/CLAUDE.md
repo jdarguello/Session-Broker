@@ -87,12 +87,14 @@ Session CRUD endpoints are secondary/legacy unless explicitly requested.
 | Argo CD pattern | **App-of-apps**: `gitops/apps/` holds child Application manifests; root app syncs that folder |
 | Keycloak | **Deployed in-cluster** via Bitnami Helm chart, managed by Argo CD |
 | Slack↔Keycloak identity binding | **Signed one-time `state` (nonce)** in the OAuth Authorization-Code flow; broker mints `login:{nonce}→slack_user_id` and recovers it at callback (see Identity Correlation & Write Path) |
-| Token provenance (write path) | **Broker is the confidential OAuth client and performs the `code→token` exchange itself** — it no longer trusts raw tokens posted by the caller (go-live; the demo still uses the trusted callback) |
-| Slack→Keycloak user model | **Single Google Workspace domain; email matches across Slack and Google.** Used as a defense-in-depth cross-check at callback, **not** as the cache key |
+| Token provenance (write path) | **Broker is the confidential OAuth client and performs the `code→token` exchange itself** — it no longer trusts raw tokens posted by the caller. **Promoted to demo scope (2026-06-23):** the ArgoCon demo now ships this real flow; the trusted `POST /auth/callback/cache` is **superseded** (kept only as a labeled test shim). |
+| Writer browser exposure | **Kubernetes Ingress with AWS ALB Controller annotations** (parity with the EnterpriseClaw main project). The user's browser reaches Keycloak + the broker callback through the ALB. ⚠️ Prereq: an AWS-backed cluster running the AWS Load Balancer Controller — the current local kubeadm-in-UTM cluster has **no** ingress controller, so the ALB Ingress won't get an address there. |
+| Demo IdP | **Google Workspace federation behind Keycloak.** The broker only ever talks to Keycloak; Google is Keycloak's upstream IdP, transparent to the broker's code. |
+| Slack→Keycloak user model | **Single Google Workspace domain; email matches across Slack and Google.** Used as a defense-in-depth cross-check at callback, **not** as the cache key (cross-check itself deferred to hardening — see Demo Scope) |
 
 ### Dapr + Keycloak integration pattern (from https://oneuptime.com/blog/post/2026-03-31-dapr-with-keycloak/view)
 
-- Keycloak callback invokes broker write endpoint to persist encrypted token material
+- Keycloak redirects the browser to the broker's `GET /auth/callback`; the broker exchanges the `code` for tokens and persists the encrypted token material
 - Cache key is Slack user ID, with strict `exp` claim TTL policy
 - Broker read endpoint resolves the cached token and returns the user's access token + claims
 - Workload trust boundary is **mTLS** (enforced by Istio in EnterpriseClaw), not an in-app SPIFFE/Istio contract
@@ -104,26 +106,29 @@ Session CRUD endpoints are secondary/legacy unless explicitly requested.
 - Future multi-tenant extension (optional): `<tenant-id>:<slack-user-id>`
 - **Binding mechanism** (how the Slack ID is established at write time): the caller never supplies a raw `slack_user_id` at the callback. It is established via a broker-minted one-time `state` nonce — see **Identity Correlation & Write Path**.
 
-## Identity Correlation & Write Path (go-live design, RESOLVED)
+## Identity Correlation & Write Path (DEMO SCOPE as of 2026-06-23, RESOLVED)
 
-How a Slack user ID binds to the Keycloak/Google identity, and how token provenance is guaranteed. Resolved 2026-06-22. This is the **go-live** design; see Demo Scope for what the ArgoCon demo ships instead.
+How a Slack user ID binds to the Keycloak/Google identity, and how token provenance is guaranteed. Resolved 2026-06-22; **promoted from go-live to demo scope 2026-06-23** — the ArgoCon demo now ships this real flow, not the trusted-token shortcut.
 
 **Decision: signed one-time `state` (nonce) in the OAuth Authorization-Code flow, with the broker as the confidential OAuth client.** The broker mints the binding and performs the `code→token` exchange itself — it no longer trusts a raw token or a raw `slack_user_id` supplied by the caller.
 
 Flow:
-1. An "open" agent (EnterpriseClaw) hits an authorization wall and decides it needs the user to log in. It calls the broker: `POST /auth/login/start { slack_user_id }` over mTLS / internal-only.
-2. Broker mints a **one-time opaque nonce**, stores `login:{nonce} → slack_user_id` in Redis with a short TTL (~5 min), builds the Keycloak `/authorize?...&state={nonce}` URL (the **broker constructs the URL** — Keycloak does not "produce" it), and returns it.
-3. Agent posts the URL to the user in Slack. User authenticates via Google → Keycloak.
-4. Keycloak redirects the browser to the broker callback `GET /auth/callback?code=&state={nonce}`.
-5. Broker: consume the nonce (**single use — delete on read**) → recover `slack_user_id`; **exchange `code`→tokens itself** (provenance guaranteed); run the **email cross-check** (below); cache the token set under `slack:{slack_user_id}`.
+1. **`POST /auth/login/start { slack_user_id }`** (internal-only). An "open" agent (EnterpriseClaw) hits an authorization wall and needs the user to log in, so it calls this.
+2. Broker mints a **one-time opaque nonce** + a **PKCE `code_verifier`**, stores `login:{nonce} → { slack_user_id, code_verifier }` in Redis with a short TTL (~5 min), builds the Keycloak `/authorize?...&state={nonce}&code_challenge=…` URL (the **broker constructs the URL** — Keycloak does not "produce" it), and returns it.
+3. Agent posts the URL to the user in Slack. User authenticates via **Google → Keycloak**.
+4. Keycloak redirects the browser (through the **AWS ALB Ingress**) to the broker callback `GET /auth/callback?code=&state={nonce}`.
+5. The callback runs **three internal steps** (the structure defined 2026-06-23):
+   - **(1) Identify** — consume the nonce (**single use — delete on read**) → recover `slack_user_id` (+ `code_verifier`); capture the `code`.
+   - **(2) Exchange** — POST the `code` (+ `client_id`/`client_secret` + PKCE `code_verifier`) to Keycloak's token endpoint → receive access + refresh + ID tokens (provenance guaranteed).
+   - **(3) Store** — encrypt the token set and persist it in Redis keyed by `slack:{slack_user_id}` (reuses the existing `cache_token`).
 
-Why this design: it closes both go-live security holes with one flow — **binding** (the Slack ID rides as an unguessable, single-use, broker-owned nonce; the caller never supplies it at the callback) and **provenance** (the broker mints tokens via the `code` exchange, so cached tokens are guaranteed Keycloak-issued). It keeps Slack user ID as the cache key, so the reader path is unchanged.
+Why this design: it closes both security holes with one flow — **binding** (the Slack ID rides as an unguessable, single-use, broker-owned nonce; the caller never supplies it at the callback) and **provenance** (the broker mints tokens via the `code` exchange, so cached tokens are guaranteed Keycloak-issued). It keeps Slack user ID as the cache key, so the reader path is unchanged.
 
 Broker as confidential OAuth client: needs `client_id` + `client_secret` (K8s Secret), a registered `redirect_uri`, scopes `openid email profile` + **`offline_access`** (so a refresh token is actually issued), and **PKCE**.
 
 **Two risks this design introduces — both must be handled:**
-1. **Identity-injection on `login/start`.** The nonce proves "a login I initiated," not "the right person finished it." An attacker who can call `login/start` for a victim's Slack ID and then authenticate as *himself* would poison the victim's cache key. Defenses (use both): (a) gate `login/start` to the EnterpriseClaw gateway only (mTLS / internal-only); (b) **email cross-check at callback** — resolve the nonce's `slack_user_id` to its corporate email (Slack `users.info`, scope `users:read.email`) and require the Keycloak token's verified `email` to match; reject on mismatch. The cross-check is the robust backstop and is **viable because every user is one verified `@corp.com` Google Workspace identity, with matching email across Slack and Google** (confirmed 2026-06-22).
-2. **The callback `redirect_uri` must be browser-reachable.** The user's browser is redirected to `/auth/callback`, so the writer needs external exposure and the `redirect_uri` registered in Keycloak. **Ingress for the writer is therefore functional at go-live, not deferred hardening.**
+1. **Identity-injection on `login/start`.** The nonce proves "a login I initiated," not "the right person finished it." An attacker who can call `login/start` for a victim's Slack ID and then authenticate as *himself* would poison the victim's cache key. Defenses (use both): (a) gate `login/start` to the EnterpriseClaw gateway only (mTLS / internal-only); (b) **email cross-check at callback** — resolve the nonce's `slack_user_id` to its corporate email (Slack `users.info`, scope `users:read.email`) and require the Keycloak token's verified `email` to match; reject on mismatch. The cross-check is the robust backstop and is **viable because every user is one verified `@corp.com` Google Workspace identity, with matching email across Slack and Google** (confirmed 2026-06-22). **Demo (2026-06-23): only defense (a) — gating `login/start` internal-only — ships; the email cross-check is deferred to hardening.**
+2. **The callback `redirect_uri` must be browser-reachable.** The user's browser is redirected to `/auth/callback`, so the writer is exposed via a **Kubernetes Ingress with AWS ALB Controller annotations** (parity with EnterpriseClaw), and the `redirect_uri` is registered in Keycloak. **This Ingress is demo-functional, not deferred hardening.** ⚠️ The current local kubeadm-in-UTM cluster has no ingress controller, so the ALB Ingress only resolves on an AWS-backed cluster — track as a demo prerequisite.
 
 **Email is a cross-check, not the binding.** Do not key the cache by email (it is mutable and would force a Slack→email resolution on every read). Use the matching-email fact only to validate the binding at callback and for audit.
 
@@ -141,6 +146,7 @@ Broker as confidential OAuth client: needs `client_id` + `client_secret` (K8s Se
 Current target is an **ArgoCon demo** that works *reasonably*, not a production deployment. Time is limited. Do not over-engineer; prefer the smallest change that makes the flow work.
 
 **In scope for the demo (these are functional, not hardening — they block the demo if missing):**
+- **Real OAuth Authorization-Code write path** (promoted 2026-06-23): `POST /auth/login/start` mints the nonce + PKCE + authorize URL; `GET /auth/callback` runs the three steps (identify → exchange → store). Requires a Keycloak **confidential client** with a `client_secret` (new K8s Secret), **Google federation** behind Keycloak, a registered `redirect_uri`, and the **AWS ALB Ingress** for the callback.
 - The reader (`/identity/resolve`) must **return the user's access token**, not just claims. (Today it drops the token — must fix.)
 - The Dapr **bearer middleware must not break the read path**. It points at Keycloak and 401s callers with no user bearer; remove it from the reader path or confirm the call path bypasses it. The reader must not be forced to contact Keycloak.
 - `exp=None → no TTL` and missing httpx timeouts are cheap correctness fixes worth doing.
@@ -149,7 +155,7 @@ Current target is an **ArgoCon demo** that works *reasonably*, not a production 
 - Splitting writer/reader into separate Deployments + service accounts (`BROKER_ROLE` router-gating).
 - Separate Redis ACL users (write-only / read-only) and two Dapr state-store components. **Landmine:** Dapr's Redis state store uses Lua/EVAL + etag reads even on writes, so a strict write-only ACL likely breaks Dapr saves — must be tested before relying on it.
 - Refresh-token usage (broker refreshing expired access tokens on read). **Design tension unresolved** — see Identity Correlation & Write Path (reader must not touch Keycloak, but refresh requires it).
-- Write-path authentication & Slack↔Keycloak binding — **DECIDED** (2026-06-22): go-live uses the broker-minted signed-`state` OAuth Authorization-Code flow with the broker as confidential OAuth client (see **Identity Correlation & Write Path**). The implementation work (new `POST /auth/login/start` + `GET /auth/callback`, nonce store, `code→token` exchange, email cross-check, writer Ingress) is deferred to the go-live milestone, **not** demo scope. **The ArgoCon demo still ships the simpler trusted `POST /auth/callback/cache` (raw tokens) — an accepted, explicitly-named gap to call out in the demo narrative.**
+- Write-path authentication & Slack↔Keycloak binding — **PROMOTED TO DEMO SCOPE (2026-06-23).** The demo now ships the broker-minted signed-`state` OAuth Authorization-Code flow (broker as confidential OAuth client): `POST /auth/login/start` + the real `GET /auth/callback` (3 steps: identify → exchange → store), Google federation behind Keycloak, and an AWS ALB Ingress for the callback (see **Identity Correlation & Write Path**). The trusted `POST /auth/callback/cache` is **superseded** — retained only as a clearly-labeled test shim. **Still deferred to hardening:** the email cross-check at callback.
 - HA (Dapr/Redis/Keycloak), Redis replication + encryption-at-rest, image build CI, secret provisioning automation, NetworkPolicies, non-root container, monitoring.
 
 When the project reaches "production-mind" status we revisit all deferred items together.
@@ -165,14 +171,16 @@ When the project reaches "production-mind" status we revisit all deferred items 
 
 Prioritize these broker APIs in docs and implementation:
 
-**Demo (current implementation):**
-- `POST /auth/callback/cache` — trusted raw-token write (accepted demo gap; see Demo Scope)
-- `POST /identity/resolve` — must return the user's **access token**, not just claims
+**Demo (current target — real OAuth write path, as of 2026-06-23):**
+- `POST /auth/login/start` — mint one-time `state` nonce + PKCE `code_verifier`, store `login:{nonce}→{slack_user_id, code_verifier}`, return the Keycloak authorize URL (internal-only)
+- `GET /auth/callback` — **(1)** recover `slack_user_id` from `state` + capture `code`, **(2)** exchange `code`→tokens at Keycloak (client_secret + PKCE), **(3)** store the encrypted token set in Redis. Browser-reachable via the AWS ALB Ingress. **Supersedes** `POST /auth/callback/cache`.
+- `POST /identity/resolve` — returns the user's **access token** + identity claims
 
-**Go-live (resolved design — see Identity Correlation & Write Path):**
-- `POST /auth/login/start` — mint one-time `state` nonce, return the Keycloak authorize URL (mTLS / internal-only)
-- `GET /auth/callback` — consume nonce, `code→token` exchange, email cross-check, cache; **replaces** `POST /auth/callback/cache`
-- `POST /identity/resolve` — unchanged; returns the user's access token + claims
+**Retained as a test shim (not the demo narrative):**
+- `POST /auth/callback/cache` — trusted raw-token write; kept only for scripted tests/CI, clearly labeled. Remove at go-live.
+
+**Deferred to hardening:**
+- Email cross-check at callback; writer/reader split; refresh-token usage.
 
 Support both direct REST and Dapr service invocation examples.
 
