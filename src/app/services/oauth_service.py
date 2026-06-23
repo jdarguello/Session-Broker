@@ -97,6 +97,30 @@ async def consume_nonce(state: str) -> dict:
     return record
 
 
+def _keycloak_token_url() -> str:
+    """
+    Return the BACK-CHANNEL token endpoint URL for the broker pod's own outbound
+    code→token exchange.
+
+    Who makes the request matters here:
+    - FRONT-CHANNEL (user's browser): the authorize URL is built from
+      KEYCLOAK_ISSUER_URL (the external, publicly reachable URL). That path
+      is handled by _build_authorize_url / _keycloak_issuer — not this helper.
+    - BACK-CHANNEL (this broker pod): the token POST goes pod-to-pod inside
+      the cluster. Use KEYCLOAK_TOKEN_URL when set (e.g.
+      http://keycloak.keycloak.svc.cluster.local/realms/enterpriseclaw/
+      protocol/openid-connect/token) so the call never leaves the cluster.
+
+    Fallback: if KEYCLOAK_TOKEN_URL is unset or empty, derive the URL from
+    KEYCLOAK_ISSUER_URL exactly as before, preserving back-compat for local
+    dev and CI environments that do not set the new variable.
+    """
+    explicit = os.getenv("KEYCLOAK_TOKEN_URL", "").strip()
+    if explicit:
+        return explicit
+    return f"{_keycloak_issuer()}/protocol/openid-connect/token"
+
+
 async def exchange_code_for_tokens(code: str, code_verifier: str) -> dict:
     """
     Exchange an authorization code for tokens at the Keycloak token endpoint.
@@ -104,8 +128,7 @@ async def exchange_code_for_tokens(code: str, code_verifier: str) -> dict:
     Returns a dict with access_token, refresh_token, id_token.
     Raises httpx.HTTPStatusError on non-2xx from Keycloak.
     """
-    issuer = _keycloak_issuer()
-    token_url = f"{issuer}/protocol/openid-connect/token"
+    token_url = _keycloak_token_url()
 
     data = {
         "grant_type": "authorization_code",
