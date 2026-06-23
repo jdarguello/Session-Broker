@@ -4,45 +4,107 @@ sidebar_position: 2
 
 # Dapr + Keycloak Integration
 
-Session Broker uses Keycloak as token issuer and Dapr as runtime middleware plus state abstraction.
+Session Broker uses Keycloak as the OAuth Authorization Server and IdP federation hub, and Dapr as runtime middleware plus state abstraction.
 
-## Current integration (implemented)
+## Write path — OAuth Authorization-Code flow (demo, as of 2026-06-23)
 
-### 1. Dapr bearer middleware validates incoming tokens
+The broker is the **confidential OAuth client**. It performs the `code → token` exchange itself; it never trusts raw tokens supplied by a caller. The Slack user ID is bound to the Keycloak/Google identity via a broker-minted, single-use `state` nonce — the caller never supplies a `slack_user_id` at the callback.
 
-The Session Broker does not validate JWT signatures itself. Dapr's `middleware.http.bearer` component validates signature, issuer, audience, and expiry before requests reach FastAPI.
+### End-to-end flow
 
-Middleware component:
-
-```yaml
-apiVersion: dapr.io/v1alpha1
-kind: Component
-metadata:
-  name: keycloak-validator
-  namespace: session-broker
-spec:
-  type: middleware.http.bearer
-  version: v1
-  metadata:
-    - name: jwksURL
-      value: "http://keycloak.keycloak.svc.cluster.local/realms/session-broker/protocol/openid-connect/certs"
-    - name: audience
-      value: "session-broker-client"
-    - name: issuer
-      value: "http://keycloak.keycloak.svc.cluster.local/realms/session-broker"
+```
+EnterpriseClaw gateway
+        │
+        │ POST /auth/login/start { slack_user_id }  (internal-only)
+        ▼
+  Session Broker
+        │ 1. Mint one-time nonce + PKCE code_verifier
+        │ 2. Store login:{nonce} → { slack_user_id, code_verifier }  (Redis, ~5 min TTL)
+        │ 3. Build Keycloak /authorize URL (state=nonce, code_challenge=S256)
+        │ 4. Return { authorize_url, state }
+        ▼
+  Gateway posts authorize_url to user in Slack
+        │
+        │ User opens URL in browser
+        ▼
+  Keycloak  ←── Google Workspace (upstream IdP, transparent to broker)
+        │  User authenticates via Google → Keycloak
+        │  Keycloak issues authorization code
+        │
+        │ Browser redirect: GET /auth/callback?code=&state=
+        ▼
+  Session Broker  ← reached via AWS ALB Ingress
+        │ Step 1 — Identify: consume nonce (delete-on-read) → slack_user_id + code_verifier
+        │ Step 2 — Exchange: POST code + client_secret + code_verifier to Keycloak token endpoint
+        │            ← access_token, refresh_token, id_token (provenance guaranteed)
+        │ Step 3 — Store: AES-256-GCM encrypt token set → Redis keyed by slack:{slack_user_id}
+        │            TTL = access_token exp claim; audit log emitted
+        ▼
+  Browser redirected to success page
 ```
 
-### 2. Broker decodes claims for app-level identity fields
+### Keycloak confidential client requirements
 
-After Dapr validation succeeds, the broker extracts these claims from JWT payload:
+| Setting | Value |
+|---|---|
+| Client ID | `session-broker` |
+| Client secret | K8s Secret `keycloak-client-secret` |
+| `redirect_uri` | `https://<alb-hostname>/auth/callback` |
+| Scopes | `openid email profile offline_access` |
+| PKCE method | `S256` |
+| Grant type | `authorization_code` |
+| Realm | `session-broker` |
 
-- `sub` -> `user_id`
-- `email` -> `user_email`
-- `realm_access.roles` -> `roles`
+The `offline_access` scope causes Keycloak to issue a refresh token alongside the access token.
 
-This identity data is attached to session documents.
+### Identity binding — why the nonce design
 
-### 3. Dapr state component handles Redis I/O
+The `state` nonce is minted by the broker (not the caller) and stored single-use in Redis. This closes two security properties simultaneously:
+
+- **Binding**: the Slack user ID rides in the nonce store, never in the callback URL. A caller who does not know the nonce cannot inject an arbitrary `slack_user_id`.
+- **Provenance**: the broker performs the `code → token` exchange, so every token in Redis is guaranteed Keycloak-issued.
+
+:::note Google is Keycloak's upstream IdP
+The broker only ever calls Keycloak. Google Workspace federation is configured inside Keycloak and is transparent to the broker's code.
+:::
+
+### ALB Ingress
+
+The callback endpoint `GET /auth/callback` must be browser-reachable. It is exposed via a Kubernetes Ingress with AWS ALB Controller annotations, matching the EnterpriseClaw main project's ingress pattern.
+
+:::warning Demo prerequisite
+The ALB Ingress only resolves on an AWS-backed cluster running the AWS Load Balancer Controller. The current local kubeadm-in-UTM cluster has no ingress controller — the callback URL will not be reachable there.
+:::
+
+---
+
+## Read path — resolve cached token
+
+The read path is **entirely Keycloak-free**. It resolves the cached token from Redis and returns the user's access token to the caller.
+
+```
+Argo Workflows step (EnterpriseClaw)
+        │
+        │ POST /identity/resolve
+        │ X-Slack-User-Id: U07ABC123
+        ▼
+  Session Broker
+        │ 1. Look up slack:{slack_user_id} in Redis (via Dapr state store)
+        │ 2. Decrypt token set (AES-256-GCM)
+        │ 3. Validate exp claim — reject if expired (401)
+        │ 4. Emit audit log
+        │ 5. Return access_token + identity claims
+        ▼
+  Caller attaches access_token as Bearer on downstream agent calls
+```
+
+The reader must never contact Keycloak. Workload trust is enforced by mTLS in EnterpriseClaw (Istio); the broker itself does not implement that boundary — its job stops at storing and returning the token.
+
+---
+
+## Dapr integration
+
+### State store — Redis
 
 `gitops/session-broker/base/dapr-statestore.yaml` defines the state store used by the broker:
 
@@ -60,58 +122,57 @@ spec:
       value: "redis-master.redis.svc.cluster.local:6379"
 ```
 
-### 4. Current API surface behind this integration
+All state operations (nonce store, token store, token read) go through this Dapr component. The broker never calls Redis directly.
 
-The currently implemented authenticated API surface is:
+### Bearer middleware — write path only
 
-```http
-POST   /sessions
-GET    /sessions/{session_id}
-PATCH  /sessions/{session_id}
-POST   /sessions/{session_id}/handoff
-DELETE /sessions/{session_id}
-GET    /health
+Dapr's `middleware.http.bearer` component is used to validate inbound Keycloak tokens on protected endpoints. It is **not** applied to the read path (`/identity/resolve`) — the reader must not be forced to present a Keycloak bearer token and must not contact Keycloak.
+
+```yaml
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: keycloak-validator
+  namespace: session-broker
+spec:
+  type: middleware.http.bearer
+  version: v1
+  metadata:
+    - name: jwksURL
+      value: "http://keycloak.keycloak.svc.cluster.local/realms/session-broker/protocol/openid-connect/certs"
+    - name: audience
+      value: "session-broker"
+    - name: issuer
+      value: "http://keycloak.keycloak.svc.cluster.local/realms/session-broker"
 ```
 
-## Planned token-broker extension (not implemented yet)
-
-The following contract remains a target architecture and is documented in the API section as planned:
-
-```json
-{
-  "planned_endpoints": [
-    "POST /auth/callback/cache",
-    "POST /identity/resolve"
-  ]
-}
-```
-
-## Dapr invocation support
-
-The current endpoints can also be called through Dapr service invocation:
+### Dapr service invocation endpoints
 
 ```http
-POST   /v1.0/invoke/session-broker/method/sessions
-GET    /v1.0/invoke/session-broker/method/sessions/{session_id}
-PATCH  /v1.0/invoke/session-broker/method/sessions/{session_id}
-POST   /v1.0/invoke/session-broker/method/sessions/{session_id}/handoff
-DELETE /v1.0/invoke/session-broker/method/sessions/{session_id}
+POST   /v1.0/invoke/session-broker/method/auth/login/start
+GET    /v1.0/invoke/session-broker/method/auth/callback
+POST   /v1.0/invoke/session-broker/method/identity/resolve
 GET    /v1.0/invoke/session-broker/method/health
 ```
 
-## Keycloak realm setup
+---
 
-After Keycloak is deployed, configure the following (can be scripted via the Admin REST API):
+## Keycloak realm setup
 
 | Setting | Value |
 |---|---|
 | Realm | `session-broker` |
-| Client ID | `session-broker-client` |
-| Client scopes | Include scopes required by callers of `/sessions` endpoints |
-| Realm roles | Roles mapped into `realm_access.roles` claims |
-| Validation target | Dapr middleware validates bearer token before app logic |
+| Client ID | `session-broker` |
+| Client type | Confidential (client secret required) |
+| Client scopes | `openid email profile offline_access` |
+| IdP federation | Google Workspace (configured inside Keycloak) |
+| `redirect_uri` | `https://<alb-hostname>/auth/callback` |
+| JWKS endpoint | `http://keycloak.keycloak.svc.cluster.local/realms/session-broker/protocol/openid-connect/certs` |
 
-Keycloak's JWKS endpoint will be available at:
-```
-http://keycloak.keycloak.svc.cluster.local/realms/session-broker/protocol/openid-connect/certs
-```
+---
+
+## Deferred to hardening
+
+- **Email cross-check at callback** — verify the Keycloak token's `email` claim matches the Slack user's corporate email; backstop against identity-injection on `login/start`.
+- **Writer/reader split** — separate Deployments, service accounts, and Redis ACL users for the write and read paths.
+- **Refresh-token usage** — broker proactively refreshing an expired access token on the read path. Design tension unresolved: the reader must not contact Keycloak, but refresh requires it.
