@@ -30,7 +30,48 @@ The GitOps manifests reference this image: the `base` deployment pins `:latest`,
 
 - `kubectl` connected to the target cluster
 - Argo CD installed in the `argocd` namespace ([installation docs](https://argo-cd.readthedocs.io/en/stable/getting_started/))
+- A **default `StorageClass`** with a working dynamic provisioner (see below)
 - Secrets created before syncing (see below)
+
+## Cluster storage (default StorageClass)
+
+Several dependencies request `PersistentVolumeClaim`s — Dapr's **scheduler** (etcd
+data dir), **Redis** (`master`), and **Keycloak**'s bundled **PostgreSQL**. A bare
+`kubeadm` cluster ships with **no** storage provisioner and **no** default
+`StorageClass`, so every one of those PVCs stays `Pending` and the pods never
+schedule:
+
+```
+FailedScheduling  pod has unbound immediate PersistentVolumeClaims
+FailedBinding     no persistent volumes available for this claim and no storage class is set
+```
+
+For a lab/demo cluster, install [local-path-provisioner](https://github.com/rancher/local-path-provisioner)
+(dynamic `hostPath` volumes) and mark it default:
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.36/deploy/local-path-storage.yaml
+kubectl annotate storageclass local-path storageclass.kubernetes.io/is-default-class=true --overwrite
+```
+
+Since Kubernetes 1.28 the `RetroactiveDefaultStorageClass` feature assigns the new
+default to any already-`Pending` PVCs automatically — no need to delete/recreate them.
+
+## Dependency images (Bitnami / `bitnamilegacy`)
+
+The Redis and Keycloak Helm values pin their images to **`docker.io/bitnamilegacy/*`**
+rather than `docker.io/bitnami/*`. On **2025-08-28** Broadcom's "Bitnami Secure Images"
+migration removed the free `docker.io/bitnami/*` **versioned** tags (only a small set of
+`latest` tags remain). Pulls of the chart-default tags now fail with:
+
+```
+failed to resolve reference "docker.io/bitnami/redis:<tag>": not found  (ErrImagePull / NotFound)
+```
+
+The retired tags were copied verbatim to the frozen **`docker.io/bitnamilegacy/*`** repo,
+so the values just repoint the registry/repository there. **`bitnamilegacy` is
+unmaintained** (no further updates or CVE fixes) — acceptable for the demo, but a
+production deployment should migrate to maintained images.
 
 ## Required secrets
 

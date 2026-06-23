@@ -1,6 +1,15 @@
 # Keycloak Bitnami Helm values
 # https://github.com/bitnami/charts/tree/main/bitnami/keycloak
 
+# Bitnami retired the free docker.io/bitnami/* versioned tags on 2025-08-28
+# (Broadcom "Bitnami Secure Images" migration). The pinned tags this chart and
+# its bundled PostgreSQL subchart reference were moved verbatim to the frozen
+# docker.io/bitnamilegacy/* repo. Repoint there to keep the demo working.
+# NOTE: bitnamilegacy is unmaintained — for production, migrate to maintained images.
+image:
+  registry: docker.io
+  repository: bitnamilegacy/keycloak
+
 auth:
   adminUser: admin
   # adminPassword is set via a Kubernetes Secret — do not store plaintext here
@@ -11,6 +20,9 @@ replicaCount: 1
 
 postgresql:
   enabled: true
+  image:
+    registry: docker.io
+    repository: bitnamilegacy/postgresql
   auth:
     existingSecret: keycloak-postgresql-secret
 
