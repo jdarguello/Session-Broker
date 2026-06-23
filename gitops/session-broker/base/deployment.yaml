@@ -40,6 +40,24 @@ spec:
             # source it from a `session-broker-secret` via secretKeyRef.
             - name: TOKEN_ENCRYPTION_KEY
               value: "lIlY2h9S1NPc2+QqFnNx4Wz9TPuPXzHiW0InHJURpNc="
+            # OAuth confidential-client config (write path — broker as Keycloak client).
+            # KEYCLOAK_ISSUER_URL and KEYCLOAK_CLIENT_ID are config values, not secrets.
+            # KEYCLOAK_CLIENT_SECRET is sourced from the "session-broker-secret" K8s Secret,
+            # provisioned out-of-band before deploy (same pattern as redis-secret and
+            # keycloak-admin-secret — do not commit plaintext client secrets here).
+            - name: KEYCLOAK_ISSUER_URL
+              value: "https://keycloak.session-broker.example.com/realms/enterpriseclaw"
+            - name: KEYCLOAK_CLIENT_ID
+              value: "session-broker"
+            - name: KEYCLOAK_REDIRECT_URI
+              value: "https://broker.session-broker.example.com/auth/callback"
+            - name: KEYCLOAK_SCOPES
+              value: "openid email profile offline_access"
+            - name: KEYCLOAK_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: session-broker-secret
+                  key: keycloak-client-secret
           readinessProbe:
             httpGet:
               path: /health
