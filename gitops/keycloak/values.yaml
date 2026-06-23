@@ -18,6 +18,17 @@ auth:
 
 replicaCount: 1
 
+# Keycloak's Quarkus build/boot OOMKills (exit 137) under the Bitnami default
+# preset (768Mi limit). Give the JVM room — nodes have ~3.3Gi allocatable each.
+# Explicit `resources` overrides any chart resourcesPreset.
+resources:
+  requests:
+    cpu: 500m
+    memory: 768Mi
+  limits:
+    cpu: "1"
+    memory: 1536Mi
+
 postgresql:
   enabled: true
   image:
