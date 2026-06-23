@@ -173,3 +173,175 @@ def test_identity_resolve_no_token_values_in_audit_log(mock_get, monkeypatch, ca
         assert access_tok not in record.getMessage(), "access_token leaked into audit log"
         assert "secret-refresh-tok" not in record.getMessage(), "refresh_token leaked into audit log"
         assert "secret-id-tok" not in record.getMessage(), "id_token leaked into audit log"
+
+
+# ── POST /auth/login/start ───────────────────────────────────────────────────
+
+
+@patch("app.services.oauth_service._dapr_save", new_callable=AsyncMock)
+def test_login_start_returns_authorize_url(mock_save, monkeypatch):
+    """login/start must return an authorize_url containing all required OAuth params."""
+    monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", TEST_KEY)
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.example.com/realms/demo")
+    monkeypatch.setenv("KEYCLOAK_CLIENT_ID", "session-broker")
+    monkeypatch.setenv("KEYCLOAK_REDIRECT_URI", "https://broker.example.com/auth/callback")
+    monkeypatch.setenv("KEYCLOAK_SCOPES", "openid email profile offline_access")
+    mock_save.return_value = None
+
+    resp = client.post("/auth/login/start", json={"slack_user_id": "U42"})
+    assert resp.status_code == 200
+    body = resp.json()
+
+    assert "authorize_url" in body
+    assert "state" in body
+
+    url = body["authorize_url"]
+    nonce = body["state"]
+
+    # Required OAuth/PKCE params must appear in the URL
+    assert "response_type=code" in url
+    assert "client_id=session-broker" in url
+    assert "redirect_uri=" in url
+    assert "scope=" in url
+    assert f"state={nonce}" in url
+    assert "code_challenge=" in url
+    assert "code_challenge_method=S256" in url
+
+    # Dapr save must have been called with login:{nonce}
+    mock_save.assert_called_once()
+    call_key = mock_save.call_args[0][0]
+    assert call_key == f"login:{nonce}"
+
+
+@patch("app.services.oauth_service._dapr_save", new_callable=AsyncMock)
+def test_login_start_stores_nonce_with_ttl(mock_save, monkeypatch):
+    """login/start must store the nonce with a 5-minute TTL."""
+    monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", TEST_KEY)
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.example.com/realms/demo")
+    monkeypatch.setenv("KEYCLOAK_CLIENT_ID", "session-broker")
+    monkeypatch.setenv("KEYCLOAK_REDIRECT_URI", "https://broker.example.com/auth/callback")
+    mock_save.return_value = None
+
+    resp = client.post("/auth/login/start", json={"slack_user_id": "U99"})
+    assert resp.status_code == 200
+
+    # TTL must be 300 seconds
+    call_ttl = mock_save.call_args[1].get("ttl_seconds") or mock_save.call_args[0][2]
+    assert call_ttl == 300
+
+    # Stored value must contain slack_user_id and code_verifier (but not the tokens)
+    stored_value = mock_save.call_args[0][1]
+    assert stored_value["slack_user_id"] == "U99"
+    assert "code_verifier" in stored_value
+
+
+# ── GET /auth/callback ───────────────────────────────────────────────────────
+
+
+@patch("app.services.token_service._dapr_save", new_callable=AsyncMock)
+@patch("app.services.oauth_service._dapr_delete", new_callable=AsyncMock)
+@patch("app.services.oauth_service._dapr_get", new_callable=AsyncMock)
+@patch("app.routers.auth.exchange_code_for_tokens", new_callable=AsyncMock)
+def test_callback_happy_path(
+    mock_exchange, mock_get, mock_delete, mock_save, monkeypatch
+):
+    """
+    callback happy path:
+    - Dapr get returns the stored nonce record.
+    - Dapr delete is called (single-use).
+    - Keycloak token exchange is called and returns tokens.
+    - cache_token persists the token set under slack:{slack_user_id}.
+    """
+    monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", TEST_KEY)
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.example.com/realms/demo")
+    monkeypatch.setenv("KEYCLOAK_CLIENT_ID", "session-broker")
+    monkeypatch.setenv("KEYCLOAK_CLIENT_SECRET", "s3cr3t")
+    monkeypatch.setenv("KEYCLOAK_REDIRECT_URI", "https://broker.example.com/auth/callback")
+
+    access_tok = _access_token(sub="kc-user-1", email="user@corp.com")
+    mock_get.return_value = {"slack_user_id": "U55", "code_verifier": "verifier-abc"}
+    mock_delete.return_value = None
+    mock_exchange.return_value = {
+        "access_token": access_tok,
+        "refresh_token": "rt-xyz",
+        "id_token": "id-xyz",
+    }
+    mock_save.return_value = None
+
+    resp = client.get("/auth/callback?code=authcode123&state=nonce-xyz")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["slack_user_id"] == "U55"
+    assert body["cached"] is True
+
+    # Nonce must have been consumed (deleted)
+    mock_delete.assert_called_once()
+    delete_key = mock_delete.call_args[0][0]
+    assert delete_key == "login:nonce-xyz"
+
+    # Token must be persisted under slack:{slack_user_id}
+    mock_save.assert_called_once()
+    save_key = mock_save.call_args[0][0]
+    assert save_key == "slack:U55"
+
+
+@patch("app.services.oauth_service._dapr_get", new_callable=AsyncMock)
+def test_callback_unknown_state_returns_400(mock_get, monkeypatch):
+    """callback with an unknown or already-consumed state nonce must return 400."""
+    monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", TEST_KEY)
+    mock_get.return_value = None
+
+    resp = client.get("/auth/callback?code=irrelevant&state=bad-nonce")
+    assert resp.status_code == 400
+
+
+@patch("app.services.token_service._dapr_save", new_callable=AsyncMock)
+@patch("app.services.oauth_service._dapr_delete", new_callable=AsyncMock)
+@patch("app.services.oauth_service._dapr_get", new_callable=AsyncMock)
+@patch("app.routers.auth.exchange_code_for_tokens", new_callable=AsyncMock)
+def test_callback_nonce_is_single_use(
+    mock_exchange, mock_get, mock_delete, mock_save, monkeypatch
+):
+    """The nonce must be deleted on first read so it cannot be replayed."""
+    monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", TEST_KEY)
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.example.com/realms/demo")
+    monkeypatch.setenv("KEYCLOAK_CLIENT_ID", "session-broker")
+    monkeypatch.setenv("KEYCLOAK_CLIENT_SECRET", "s3cr3t")
+    monkeypatch.setenv("KEYCLOAK_REDIRECT_URI", "https://broker.example.com/auth/callback")
+
+    access_tok = _access_token()
+    mock_get.return_value = {"slack_user_id": "U77", "code_verifier": "cv"}
+    mock_delete.return_value = None
+    mock_exchange.return_value = {
+        "access_token": access_tok,
+        "refresh_token": "rt",
+        "id_token": "id",
+    }
+    mock_save.return_value = None
+
+    resp = client.get("/auth/callback?code=c&state=once-nonce")
+    assert resp.status_code == 200
+
+    # _dapr_delete must be called exactly once with the login key
+    mock_delete.assert_called_once_with("login:once-nonce")
+
+
+@patch("app.services.oauth_service._dapr_delete", new_callable=AsyncMock)
+@patch("app.services.oauth_service._dapr_get", new_callable=AsyncMock)
+@patch("app.routers.auth.exchange_code_for_tokens", new_callable=AsyncMock)
+def test_callback_keycloak_failure_returns_502(
+    mock_exchange, mock_get, mock_delete, monkeypatch
+):
+    """Non-2xx from Keycloak token endpoint must result in HTTP 502."""
+    monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", TEST_KEY)
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.example.com/realms/demo")
+    monkeypatch.setenv("KEYCLOAK_CLIENT_ID", "session-broker")
+    monkeypatch.setenv("KEYCLOAK_CLIENT_SECRET", "s3cr3t")
+    monkeypatch.setenv("KEYCLOAK_REDIRECT_URI", "https://broker.example.com/auth/callback")
+
+    mock_get.return_value = {"slack_user_id": "U88", "code_verifier": "cv2"}
+    mock_delete.return_value = None
+    mock_exchange.side_effect = Exception("Keycloak unavailable")
+
+    resp = client.get("/auth/callback?code=bad-code&state=nonce-abc")
+    assert resp.status_code == 502

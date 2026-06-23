@@ -64,6 +64,14 @@ async def _dapr_save(key: str, value: dict, ttl_seconds: int | None = None) -> N
         resp.raise_for_status()
 
 
+async def _dapr_delete(key: str) -> None:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
+        resp = await client.delete(f"{DAPR_STATE_URL}/{key}")
+        # 204 or 200 are both fine; raise on unexpected errors
+        if resp.status_code not in (200, 204):
+            resp.raise_for_status()
+
+
 async def cache_token(
     slack_user_id: str,
     access_token: str,
