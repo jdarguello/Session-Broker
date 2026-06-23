@@ -8,7 +8,8 @@ Session Broker is a FastAPI microservice deployed on Kubernetes with a Dapr side
 
 ## Implementation status
 
-- **Implemented (demo)**: token brokerage endpoints — `POST /auth/callback/cache` stores the user's token set; `POST /identity/resolve` returns the user's access token plus identity claims.
+- **Implemented (demo — real OAuth Authorization-Code write path)**: `POST /auth/login/start` mints a one-time `state` nonce + PKCE pair and returns the Keycloak `/authorize` URL; `GET /auth/callback` runs identify → exchange → store; `POST /identity/resolve` returns the user's access token plus identity claims.
+- **Retained as a test shim**: `POST /auth/callback/cache` (trusted raw-token write) — superseded by the OAuth flow, kept only for scripted tests/CI.
 - **Implemented**: authenticated session lifecycle (`/sessions`) backed by Redis via Dapr state store.
 
 ## Component diagram
@@ -24,47 +25,124 @@ flowchart LR
 
 ## Runtime flows
 
-### A) Current flow: authenticated session lifecycle
+The demo ships the real OAuth Authorization-Code write path plus the read path, which decomposes into **three flows**. The broker is the confidential OAuth client — it owns the binding (a one-time, broker-minted `state` nonce) and mints the tokens itself (so cached tokens are guaranteed Keycloak-issued).
 
-1. Caller sends request to `/sessions` endpoints with bearer token.
-2. Dapr bearer middleware validates token signature and claims against Keycloak JWKS.
-3. Broker decodes claims (`sub`, `email`, `realm_access.roles`) for application logic.
-4. Broker reads/writes session documents in Redis through Dapr state APIs.
+### 1) Write path — login start (`POST /auth/login/start`, internal-only)
 
-### B) Demo flow: callback cache + identity resolve
+1. An EnterpriseClaw agent hits an authorization wall and calls `POST /auth/login/start { slack_user_id }`. This endpoint is internal-only (mTLS-gated at the infrastructure layer).
+2. The broker mints a one-time opaque nonce (the OAuth `state`) and a PKCE `code_verifier`/`code_challenge` pair.
+3. It stores `login:{nonce} → { slack_user_id, code_verifier }` in Redis via Dapr with a 5-minute TTL.
+4. It builds the Keycloak `/authorize` URL from the **external** `KEYCLOAK_ISSUER_URL` (front-channel — the user's browser consumes this) and returns `{ authorize_url, state }`.
+5. The agent delivers the URL to the user (e.g. a Slack DM).
 
-1. Keycloak callback stores the user's token set by Slack user ID (trusted write via `POST /auth/callback/cache`).
-2. Authorized caller invokes `POST /identity/resolve` with the Slack user ID.
-3. Broker returns the user's access token plus identity claims so the caller can act as the user.
+### 2) Write path — callback exchange & store (`GET /auth/callback`, browser-reachable)
 
-## Sequence (current implementation)
+The user authenticates via Google → Keycloak; Keycloak redirects the browser (through the AWS ALB Ingress) to `/auth/callback?code=&state=`. The broker then runs three internal steps:
+
+1. **Identify** — consume the one-time nonce `login:{state}` (deleted on first read — single use), recovering `slack_user_id` and `code_verifier`. An invalid or already-consumed nonce returns `400`.
+2. **Exchange** — a **back-channel** POST of `code` + `code_verifier` + `client_id`/`client_secret` to the **in-cluster** Keycloak token endpoint (`KEYCLOAK_TOKEN_URL`), receiving access + refresh + ID tokens. This call never hairpins out through the ALB. A failure returns `502`.
+3. **Store** — encrypt the token set (AES-GCM) and persist it in Redis keyed by `slack:{slack_user_id}`, with TTL derived from the access token's `exp` claim.
+
+### 3) Read path — identity resolve (`POST /identity/resolve`)
+
+1. An authorized caller (an Argo Workflows step in EnterpriseClaw) sends `POST /identity/resolve` with the `X-Slack-User-Id` header.
+2. The broker reads `slack:{slack_user_id}` from Redis via Dapr.
+3. If no record exists it returns an **unauthenticated** identity (`200`). If the cached token has expired (`now ≥ exp`) it returns `401`. Otherwise it decrypts the token set, extracts the JWT claims, and returns the user's **access token** plus claims (`sub`, `email`, `roles`).
+4. The reader **never contacts Keycloak** — it only reads and decrypts cached material.
+
+## Sequence diagrams
+
+### Flow 1 — login start
 
 ```mermaid
 sequenceDiagram
-    participant C as Client
+    participant A as EnterpriseClaw Agent
+    participant B as Session Broker (writer)
     participant D as Dapr Sidecar
-    participant B as Session Broker
     participant R as Redis
-    participant K as Keycloak
+    participant U as User (Slack)
 
-    C->>D: HTTP /sessions/* with Bearer token
-    D->>K: Validate token via JWKS
-    K-->>D: Validation result
-    D->>B: Forward authenticated request
-    B->>B: Decode claims from JWT payload
-    B->>D: State API read/write
-    D->>R: Persist/fetch session
-    R-->>D: Session payload
-    D-->>B: State result
-    B-->>C: Session response
+    A->>B: POST /auth/login/start { slack_user_id }
+    B->>B: Mint one-time nonce + PKCE verifier/challenge
+    B->>D: State save login:{nonce} = {slack_user_id, code_verifier} (TTL 5m)
+    D->>R: Persist nonce record
+    R-->>D: OK
+    D-->>B: OK
+    B->>B: Build Keycloak /authorize URL (external KEYCLOAK_ISSUER_URL, front-channel)
+    B-->>A: { authorize_url, state }
+    A->>U: Deliver authorize URL via Slack DM
+```
+
+### Flow 2 — callback exchange & store
+
+```mermaid
+sequenceDiagram
+    participant U as User Browser
+    participant ALB as AWS ALB Ingress
+    participant K as Keycloak (Google IdP)
+    participant B as Session Broker (writer)
+    participant D as Dapr Sidecar
+    participant R as Redis
+
+    U->>K: Authenticate via Google federation
+    K-->>U: 302 redirect to redirect_uri?code=&state=
+    U->>ALB: GET /auth/callback?code=&state=
+    ALB->>B: Forward callback request
+
+    Note over B,R: Step 1 - IDENTIFY (single-use nonce)
+    B->>D: Get login:{state}
+    D->>R: Read nonce record
+    R-->>D: {slack_user_id, code_verifier}
+    D-->>B: nonce record
+    B->>D: Delete login:{state}
+    D->>R: Delete nonce
+
+    Note over B,K: Step 2 - EXCHANGE (back-channel, in-cluster)
+    B->>K: POST /token code + code_verifier + client_secret (KEYCLOAK_TOKEN_URL)
+    K-->>B: access + refresh + id tokens
+
+    Note over B,R: Step 3 - STORE (encrypted, TTL = exp - now)
+    B->>B: Encrypt token set (AES-GCM)
+    B->>D: State save slack:{slack_user_id}
+    D->>R: Persist encrypted tokens
+    R-->>D: OK
+    D-->>B: OK
+    B-->>U: { slack_user_id, cached: true }
+```
+
+### Flow 3 — identity resolve
+
+```mermaid
+sequenceDiagram
+    participant C as Authorized Caller (Argo Workflows step)
+    participant B as Session Broker (reader)
+    participant D as Dapr Sidecar
+    participant R as Redis
+
+    C->>B: POST /identity/resolve (header X-Slack-User-Id)
+    B->>D: Get slack:{slack_user_id}
+    D->>R: Read encrypted token record
+    R-->>D: record (or empty)
+    D-->>B: record
+
+    alt no cached record
+        B-->>C: 200 { type: unauthenticated }
+    else token expired (now >= exp)
+        B-->>C: 401 token expired - re-auth required
+    else valid
+        B->>B: Decrypt token set + extract JWT claims
+        B-->>C: 200 { access_token, sub, email, roles }
+    end
+
+    Note over B: Reader never contacts Keycloak
 ```
 
 ## Responsibilities
 
 | Layer | Responsibility |
 |---|---|
-| Keycloak | Token issuer and JWKS source for Dapr bearer validation |
-| Dapr sidecar + state API | HTTP middleware validation and Redis abstraction |
-| FastAPI broker | Token cache write/read (`/auth/callback/cache`, `/identity/resolve`) and session lifecycle operations |
+| Keycloak | Token issuer for the OAuth Authorization-Code exchange and JWKS source for Dapr bearer validation |
+| Dapr sidecar + state API | HTTP middleware validation and Redis abstraction (state save/get/delete) |
+| FastAPI broker | OAuth write path (`/auth/login/start`, `/auth/callback`), token read (`/identity/resolve`), and session lifecycle operations |
 | Redis | Token and session state storage via Dapr state store |
 | Argo CD | Delivers manifests from `gitops/` to the cluster |
