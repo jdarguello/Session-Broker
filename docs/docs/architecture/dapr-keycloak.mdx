@@ -78,6 +78,50 @@ The ALB Ingress only resolves on an AWS-backed cluster running the AWS Load Bala
 
 ---
 
+### Front-channel vs back-channel Keycloak URLs
+
+The write path contacts Keycloak in two distinct ways. The guiding principle is **who makes the request**:
+
+| Channel | Who originates it | Env var | Example value |
+|---|---|---|---|
+| **Front-channel** | User's **browser** | `KEYCLOAK_ISSUER_URL` | `https://keycloak.session-broker.example.com/realms/enterpriseclaw` |
+| **Back-channel** | **Broker pod** (server-to-server) | `KEYCLOAK_TOKEN_URL` | `http://keycloak.keycloak.svc.cluster.local/realms/enterpriseclaw/protocol/openid-connect/token` |
+
+**Front-channel** — two steps involve the user's browser:
+1. `POST /auth/login/start` builds the Keycloak `/authorize` URL. The broker constructs this URL from `KEYCLOAK_ISSUER_URL` (the external host) because the URL is sent to the user in Slack and opened in a browser. It must be internet-reachable.
+2. The `redirect_uri` registered with Keycloak (`https://broker.session-broker.example.com/auth/callback`) is also on the external host — Keycloak's 302 redirect sends the browser there after authentication.
+
+**Back-channel** — step 2 of the callback (the `code → token` exchange) is a direct server-to-server POST the broker pod makes itself. It targets `KEYCLOAK_TOKEN_URL`, the Keycloak ClusterIP Service URL. This call never leaves the cluster and does not hairpin through the ALB.
+
+```
+Browser                         Broker pod (writer)              Keycloak (in-cluster)
+   │                                    │                                │
+   │  (1) click authorize URL           │                                │
+   │ ──────────────────────────────────────────────────────────────────► │
+   │                              [user authenticates]                   │
+   │  (2) Keycloak 302 → /auth/callback │                                │
+   │ ──────────────────────────────────►│                                │
+   │                                    │  (3) POST token exchange       │
+   │                                    │ ──────────────────────────────►│
+   │                                    │    (back-channel, in-cluster)  │
+   │                                    │ ◄──────────────────────────────│
+   │                                    │    access_token, refresh_token │
+```
+
+:::info Writer security posture
+The writer pod sits in a **private subnet**. It is reachable from the internet **only on `/auth/callback`** via the AWS ALB Ingress. All other communication (nonce store → Redis, token exchange → Keycloak ClusterIP) is east-west, never leaving the cluster. Internet-exposure and backend-reach are intentionally separated by this channel split.
+:::
+
+:::info KEYCLOAK_TOKEN_URL fallback
+If `KEYCLOAK_TOKEN_URL` is not set, the broker derives the token endpoint by appending `/protocol/openid-connect/token` to `KEYCLOAK_ISSUER_URL`. This works in single-cluster setups but routes the exchange through the external host. Set `KEYCLOAK_TOKEN_URL` explicitly to keep the exchange in-cluster.
+:::
+
+:::warning KC_HOSTNAME must be pinned to the external value
+Keycloak must have `KC_HOSTNAME` (frontend URL) set to the **external** issuer host. Because the broker POSTs to the in-cluster ClusterIP for the token exchange, Keycloak would otherwise stamp `iss` with the internal hostname — making tokens fail validation on callers that check against the external issuer. Pin `KC_HOSTNAME` so the `iss` claim is always `https://keycloak.session-broker.example.com/realms/enterpriseclaw` regardless of which host the broker contacted.
+:::
+
+---
+
 ## Read path — resolve cached token
 
 The read path is **entirely Keycloak-free**. It resolves the cached token from Redis and returns the user's access token to the caller.
