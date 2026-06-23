@@ -20,6 +20,7 @@ class AuthenticatedIdentity(BaseModel):
     email: str
     roles: list[str] = Field(default_factory=list)
     slack_user_id: str
+    access_token: str = Field(..., description="Keycloak access token the caller can attach as a bearer")
 
 
 class UnauthenticatedIdentity(BaseModel):

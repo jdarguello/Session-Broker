@@ -10,7 +10,7 @@ DAPR_STATE_URL = f"http://localhost:{DAPR_HTTP_PORT}/v1.0/state/{STATE_STORE_NAM
 
 
 async def _dapr_get(key: str) -> dict | None:
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
         resp = await client.get(f"{DAPR_STATE_URL}/{key}")
         if resp.status_code == 204 or not resp.content:
             return None
@@ -20,13 +20,13 @@ async def _dapr_get(key: str) -> dict | None:
 
 async def _dapr_save(key: str, value: dict) -> None:
     payload = [{"key": key, "value": value}]
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
         resp = await client.post(DAPR_STATE_URL, json=payload)
         resp.raise_for_status()
 
 
 async def _dapr_delete(key: str) -> None:
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
         resp = await client.delete(f"{DAPR_STATE_URL}/{key}")
         resp.raise_for_status()
 

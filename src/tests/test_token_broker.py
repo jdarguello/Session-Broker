@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
@@ -99,6 +100,10 @@ def test_identity_resolve_authenticated(mock_get, monkeypatch):
     assert body["email"] == "abc@corp.com"
     assert "agent-user" in body["roles"]
     assert body["slack_user_id"] == "U12345"
+    # Token Storage Contract: access_token must be returned so the caller can
+    # attach it as a bearer to downstream requests.
+    assert "access_token" in body
+    assert body["access_token"] == access_tok
 
 
 @patch("app.services.token_service._dapr_get", new_callable=AsyncMock)
@@ -138,3 +143,33 @@ def test_identity_resolve_expired_token(mock_get, monkeypatch):
 def test_identity_resolve_missing_header():
     resp = client.post("/identity/resolve")
     assert resp.status_code == 400
+
+
+@patch("app.services.token_service._dapr_get", new_callable=AsyncMock)
+def test_identity_resolve_no_token_values_in_audit_log(mock_get, monkeypatch, caplog):
+    """Audit log lines must record only key and exp — never token values."""
+    monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", TEST_KEY)
+
+    access_tok = _access_token(sub="user-xyz", email="xyz@corp.com")
+    exp = int(datetime.now(timezone.utc).timestamp()) + 3600
+    token_data = {
+        "access_token": access_tok,
+        "refresh_token": "secret-refresh-tok",
+        "id_token": "secret-id-tok",
+        "exp": exp,
+    }
+    mock_get.return_value = {
+        "encrypted_tokens": _encrypt(token_data),
+        "exp": exp,
+        "cached_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    with caplog.at_level(logging.INFO, logger="audit"):
+        resp = client.post("/identity/resolve", headers={"X-Slack-User-Id": "U77777"})
+
+    assert resp.status_code == 200
+    # Guardrail: token strings must never appear in any log record
+    for record in caplog.records:
+        assert access_tok not in record.getMessage(), "access_token leaked into audit log"
+        assert "secret-refresh-tok" not in record.getMessage(), "refresh_token leaked into audit log"
+        assert "secret-id-tok" not in record.getMessage(), "id_token leaked into audit log"
