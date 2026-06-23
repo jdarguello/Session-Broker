@@ -7,7 +7,7 @@ sidebar_position: 1
 The token broker is the primary API surface of this service. It provides two operations:
 
 1. **Write** — store encrypted token material after a Keycloak callback.
-2. **Read** — resolve cached token data and return a workflow identity contract for Agent/MCP calls.
+2. **Read** — resolve cached token data and return the user's access token plus identity claims to the caller.
 
 ## Security and policy
 
@@ -64,7 +64,7 @@ Content-Type: application/json
 
 ---
 
-## 2) Read — resolve workflow identity
+## 2) Read — resolve identity & return access token
 
 ### REST
 
@@ -88,7 +88,8 @@ No request body is required.
   "sub": "9f8b1c2d-...",
   "email": "user@company.com",
   "roles": ["agent-user"],
-  "slack_user_id": "U07ABC123"
+  "slack_user_id": "U07ABC123",
+  "access_token": "<keycloak-access-jwt>"
 }
 ```
 

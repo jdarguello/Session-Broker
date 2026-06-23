@@ -8,11 +8,12 @@ router = APIRouter()
 @router.post("/resolve", response_model=IdentityResponse)
 async def identity_resolve(request: Request):
     """
-    Resolve the workflow identity for a Slack user.
+    Resolve the cached identity for a Slack user.
 
     Reads the cached token material from Redis (via Dapr), validates expiry,
-    decrypts the token set, and returns a minimal identity contract for
-    downstream agent and MCP authorization.
+    decrypts the token set, and returns the user's access token plus identity
+    claims (sub, email, roles, slack_user_id) so the caller can act on behalf
+    of the user when invoking downstream agents.
 
     Requires the `X-Slack-User-Id` header. Returns a partial unauthenticated
     identity when no cached token exists for the user.
