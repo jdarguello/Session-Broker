@@ -2,6 +2,20 @@ from typing import Literal, Union
 from pydantic import BaseModel, Field
 
 
+class LoginStartRequest(BaseModel):
+    slack_user_id: str = Field(..., description="Slack user ID to bind to this login flow")
+
+
+class LoginStartResponse(BaseModel):
+    authorize_url: str = Field(..., description="Keycloak /authorize URL the agent should send to the user")
+    state: str = Field(..., description="One-time opaque nonce used as the OAuth state parameter")
+
+
+class CallbackResponse(BaseModel):
+    slack_user_id: str = Field(..., description="Slack user ID whose tokens were cached")
+    cached: bool = True
+
+
 class TokenCacheRequest(BaseModel):
     slack_user_id: str = Field(..., description="Slack user ID (canonical cache key)")
     access_token: str = Field(..., description="Keycloak access token (JWT)")
