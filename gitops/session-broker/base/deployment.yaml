@@ -51,6 +51,16 @@ spec:
               value: "session-broker"
             - name: KEYCLOAK_REDIRECT_URI
               value: "https://broker.session-broker.example.com/auth/callback"
+            # Back-channel (server-to-server) Keycloak token endpoint. The broker
+            # pod POSTs the code->token exchange here, in-cluster, so it does NOT
+            # hairpin out through the ALB. Front-channel KEYCLOAK_ISSUER_URL stays
+            # EXTERNAL because the user's browser builds/clicks the /authorize URL
+            # and lands on the /auth/callback redirect_uri. Decided by "who makes
+            # the request": browser -> external; broker pod -> internal ClusterIP.
+            # Keycloak is deployed by the Bitnami chart into namespace `keycloak`,
+            # Service `keycloak`, port 80.
+            - name: KEYCLOAK_TOKEN_URL
+              value: "http://keycloak.keycloak.svc.cluster.local/realms/enterpriseclaw/protocol/openid-connect/token"
             - name: KEYCLOAK_SCOPES
               value: "openid email profile offline_access"
             - name: KEYCLOAK_CLIENT_SECRET
