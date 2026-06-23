@@ -47,7 +47,7 @@ def _decrypt(encrypted: str) -> dict:
 
 
 async def _dapr_get(key: str) -> dict | None:
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
         resp = await client.get(f"{DAPR_STATE_URL}/{key}")
         if resp.status_code == 204 or not resp.content:
             return None
@@ -59,7 +59,7 @@ async def _dapr_save(key: str, value: dict, ttl_seconds: int | None = None) -> N
     entry: dict = {"key": key, "value": value}
     if ttl_seconds is not None and ttl_seconds > 0:
         entry["metadata"] = {"ttlInSeconds": str(ttl_seconds)}
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
         resp = await client.post(DAPR_STATE_URL, json=[entry])
         resp.raise_for_status()
 
@@ -129,4 +129,5 @@ async def resolve_identity(slack_user_id: str) -> dict | None:
         "email": access_claims.get("email", ""),
         "roles": access_claims.get("realm_access", {}).get("roles", []),
         "slack_user_id": slack_user_id,
+        "access_token": token_data["access_token"],
     }
