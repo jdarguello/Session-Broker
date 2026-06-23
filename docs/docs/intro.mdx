@@ -13,11 +13,10 @@ sidebar_position: 1
 - **Stores session state in Redis via Dapr state API** — uses Dapr sidecar for state I/O abstraction
 - **Supports health checks for runtime probes** — `GET /health`
 
-## Target capabilities (planned)
+## Token brokerage capabilities (implemented — demo)
 
-- Token callback cache write: `POST /auth/callback/cache`
-- Identity resolution for channel events: `POST /identity/resolve`
-- Workflow identity conversion contract for downstream SPIFFE/Istio boundaries
+- Token callback cache write: `POST /auth/callback/cache` — stores the user's token set keyed by Slack user ID
+- Identity resolution: `POST /identity/resolve` — returns the user's access token plus identity claims so the caller can act as the user
 
 ## Core integrations
 
@@ -26,7 +25,7 @@ sidebar_position: 1
 | **Dapr sidecar** | Service invocation transport and Redis state store abstraction |
 | **Keycloak** | Identity provider; tokens are validated by Dapr bearer middleware |
 | **Redis** | Session state persistence through Dapr state store (`redis`) |
-| **Istio / SPIFFE** | Workflow identity target for downstream Agent/MCP access control |
+| **Istio / SPIFFE** | Workload trust boundary enforced by EnterpriseClaw; outside this service's scope |
 | **Argo CD** | GitOps delivery — app-of-apps pattern drives all deployments |
 
 ## Runtime workflows
@@ -38,11 +37,11 @@ sidebar_position: 1
 3. Broker decodes JWT payload claims and creates/reads/updates session state.
 4. Session data is persisted in Redis through Dapr state APIs.
 
-### Planned workflow (not yet implemented)
+### Token brokerage workflow (implemented — demo)
 
-1. Keycloak callback stores encrypted token material keyed by channel identity.
-2. Chat events call identity resolution endpoint.
-3. Broker returns workflow identity contract for agent execution.
+1. Keycloak callback stores the user's token set keyed by Slack user ID (`POST /auth/callback/cache`).
+2. Authorized caller invokes `POST /identity/resolve` with the Slack user ID.
+3. Broker returns the user's access token plus identity claims so the caller can act as the user.
 
 ## Repository layout
 
