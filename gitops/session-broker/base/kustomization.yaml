@@ -8,5 +8,7 @@ resources:
   - deployment.yaml
   - service.yaml
   - dapr-statestore.yaml
-  - dapr-bearer-middleware.yaml
+  # dapr-bearer-middleware.yaml excluded for demo: bearer validation removed
+  # from the global pipeline (see dapr-configuration.yaml). Re-include at
+  # go-live when per-route scoped auth is implemented.
   - dapr-configuration.yaml
