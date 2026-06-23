@@ -72,3 +72,20 @@ ingress:
 # "enterpriseclaw" realm pointing at the Google OAuth 2.0 endpoints for your
 # Workspace domain. Keycloak is the only IdP the broker's code ever calls;
 # Google is Keycloak's upstream, transparent to the broker.
+
+# ---------------------------------------------------------------------------
+# Front-channel vs back-channel hostname (IMPORTANT for token `iss`)
+# ---------------------------------------------------------------------------
+# The broker reaches Keycloak on TWO hosts depending on who makes the request:
+#   * Front-channel (user browser): the EXTERNAL issuer host
+#     (https://keycloak.session-broker.example.com/realms/enterpriseclaw) for the
+#     /authorize redirect -- matches the broker's KEYCLOAK_ISSUER_URL.
+#   * Back-channel (broker pod): the in-cluster ClusterIP
+#     (http://keycloak.keycloak.svc.cluster.local/.../token) for code->token --
+#     matches the broker's KEYCLOAK_TOKEN_URL.
+# Pin KC_HOSTNAME / frontend-url to the EXTERNAL value so every issued token's
+# `iss` claim is the external issuer no matter which host received the POST.
+# Otherwise tokens minted over the internal back-channel could carry an internal
+# `iss` and fail audience/issuer validation downstream.
+# (Bitnami exposes this via e.g. extraEnvVars KC_HOSTNAME / KC_HOSTNAME_URL, or
+#  the chart's hostname settings -- configure to the external host at deploy.)
