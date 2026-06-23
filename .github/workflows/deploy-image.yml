@@ -23,6 +23,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up QEMU
+        # Emulation so the amd64 runner can also build the linux/arm64 image
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -47,6 +51,12 @@ jobs:
         with:
           context: src
           file: src/Dockerfile
+          # Multi-arch so the image pulls on both amd64 and arm64 (e.g. a local
+          # Apple-Silicon cluster). Building amd64-only is what caused ErrImagePull.
+          platforms: linux/amd64,linux/arm64
+          # Skip the provenance attestation so the manifest list stays a clean
+          # two-entry index (no `unknown/unknown` entry) for maximum pull compatibility.
+          provenance: false
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

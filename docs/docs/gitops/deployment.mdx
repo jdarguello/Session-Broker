@@ -14,6 +14,9 @@ workflow. It runs on pushes to `main` that touch `src/**` (and on manual `workfl
 
 - **Image:** `ghcr.io/jdarguello/session-broker`
 - **Tags:** `latest` and `sha-<commit>` (immutable, for pinning)
+- **Platforms:** `linux/amd64` **and** `linux/arm64` (multi-arch) — so the image
+  pulls on Apple-Silicon/arm64 nodes as well as amd64. An amd64-only image is what
+  causes `ErrImagePull` (`no matching manifest for linux/arm64`) on arm64 clusters.
 - **Auth:** the built-in `GITHUB_TOKEN` (`packages: write`) — no extra secrets to configure
 - **Build context:** `src/` (uses `src/Dockerfile`), with GitHub Actions layer caching
 
