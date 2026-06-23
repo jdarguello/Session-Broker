@@ -38,6 +38,12 @@ pytest                                  # tests
 ruff check app/                         # lint
 ```
 
+## Cluster Operations
+
+- The GitOps stack runs on a **local kubeadm cluster inside a UTM VM**, managed by Argo CD. `kubectl` is **not** installed on the Mac — run cluster commands via `ssh controlplane kubectl …` (access specifics, e.g. the dedicated user/key, live in session memory).
+- `gitops/bootstrap.yaml` is **not** fully turnkey on a bare cluster: it has two out-of-band prerequisites it cannot provide — a **default StorageClass** (the kubeadm cluster ships with none, so all PVCs hang Pending) and the **pre-created Secrets** (`redis-secret` in both `redis` and `session-broker`, `keycloak-admin-secret`, `keycloak-postgresql-secret`; plaintext secrets are intentionally not committed). Both are documented in [`docs/docs/gitops/deployment.mdx`](docs/docs/gitops/deployment.mdx).
+- Dependency images are pinned to `docker.io/bitnamilegacy/*` because Broadcom retired the free `docker.io/bitnami/*` versioned tags (2025-08-28). `bitnamilegacy` is a frozen, unmaintained mirror — fine for the demo, revisit for production.
+
 ## Scope & Boundaries (IMPORTANT)
 
 This repo is **only** the session-broker microservice plus the dependencies it owns (Dapr, Keycloak, Redis). It does **not** contain — and must not try to add — the orchestration around it:
