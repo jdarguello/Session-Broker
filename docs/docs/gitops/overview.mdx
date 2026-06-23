@@ -10,6 +10,8 @@ All Kubernetes infrastructure is managed declaratively through the `gitops/` dir
 
 ```
 gitops/
+  bootstrap.yaml               ← ApplicationSet (single-file alternative to app-of-apps)
+
   apps/                        ← Argo CD Application manifests
     root-app.yaml              ← Root app (syncs this folder)
     session-broker.yaml        ← Kustomize overlay for the service
@@ -47,6 +49,25 @@ Argo CD
 ```
 
 The root Application is bootstrapped once manually (or via `kubectl apply`). After that, every change pushed to `main` is picked up by Argo CD automatically.
+
+## ApplicationSet alternative (`bootstrap.yaml`)
+
+`gitops/bootstrap.yaml` is an **ApplicationSet** that generates the same four Applications (`session-broker`, `dapr`, `keycloak`, `redis`) from a single file — a drop-in alternative to the `root-app` + `gitops/apps/` app-of-apps.
+
+```
+Argo CD
+  └── ApplicationSet: session-broker-platform   (list generator)
+        ├── session-broker  ──▶ gitops/session-broker/overlays/dev   (Kustomize)
+        ├── dapr            ──▶ dapr/dapr Helm chart        + gitops/dapr/values.yaml
+        ├── keycloak        ──▶ bitnami/keycloak Helm chart + gitops/keycloak/values.yaml
+        └── redis           ──▶ bitnami/redis Helm chart    + gitops/redis/values.yaml
+```
+
+It uses a **list generator** (one element per component) rather than a Git *directory* generator, because the `gitops/` tree is heterogeneous: `dapr/`, `keycloak/`, and `redis/` are values-only folders whose charts live in remote Helm repos (multi-source `$values` ref), while `session-broker/` is a Kustomize overlay. A directory generator pointed at `gitops/*` would try — and fail — to render the values-only folders. The differing source shapes (Helm multi-source vs. Kustomize single-source) are injected via `templatePatch`, since a structured `template` can't conditionally add or remove keys.
+
+:::warning
+The ApplicationSet and the `root-app` app-of-apps both create Applications named `session-broker`, `dapr`, `keycloak`, and `redis`. **Use one or the other, not both** — running both makes two owners fight over the same Applications.
+:::
 
 ## Namespaces
 

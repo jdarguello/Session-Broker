@@ -1,0 +1,76 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: session-broker-platform
+  namespace: argocd
+spec:
+  goTemplate: true
+  generators:
+    # One element per component under gitops/. Helm components render the remote
+    # chart with values pulled from this repo (multi-source `$values` ref); the
+    # session-broker is a Kustomize overlay that lives entirely in this repo.
+    - list:
+        elements:
+          - name: session-broker
+            namespace: session-broker
+            kind: kustomize
+            path: gitops/session-broker/overlays/dev
+          - name: dapr
+            namespace: dapr-system
+            kind: helm
+            chartRepo: https://dapr.github.io/helm-charts/
+            chart: dapr
+            version: "1.14.4"
+            valuesPath: gitops/dapr/values.yaml
+          - name: keycloak
+            namespace: keycloak
+            kind: helm
+            chartRepo: https://charts.bitnami.com/bitnami
+            chart: keycloak
+            version: "22.2.3"
+            valuesPath: gitops/keycloak/values.yaml
+          - name: redis
+            namespace: redis
+            kind: helm
+            chartRepo: https://charts.bitnami.com/bitnami
+            chart: redis
+            version: "20.3.0"
+            valuesPath: gitops/redis/values.yaml
+  template:
+    metadata:
+      name: '{{ .name }}'
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+    spec:
+      project: default
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: '{{ .namespace }}'
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+  # The Application `sources` are injected here because the shape differs per
+  # component (Helm multi-source vs. Kustomize single-source) and a structured
+  # `template` cannot conditionally add/remove keys. templatePatch is rendered as
+  # text, then strategically merged onto each generated Application.
+  templatePatch: |
+    spec:
+      sources:
+      {{- if eq .kind "helm" }}
+        - repoURL: {{ .chartRepo }}
+          chart: {{ .chart }}
+          targetRevision: "{{ .version }}"
+          helm:
+            valueFiles:
+              - $values/{{ .valuesPath }}
+        - repoURL: https://github.com/jdarguello/Session-Broker.git
+          targetRevision: HEAD
+          ref: values
+      {{- else }}
+        - repoURL: https://github.com/jdarguello/Session-Broker.git
+          targetRevision: HEAD
+          path: {{ .path }}
+      {{- end }}

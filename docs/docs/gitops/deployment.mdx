@@ -50,13 +50,23 @@ kubectl create secret generic keycloak-admin-secret \
   -n keycloak --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-## Bootstrap the root app
+## Bootstrap
+
+Pick **one** of the two equivalent entry points (do not apply both — they create the same four Applications and would collide).
+
+**Option A — app-of-apps root:**
 
 ```bash
 kubectl apply -f gitops/apps/root-app.yaml
 ```
 
-Argo CD will discover and sync all child Applications (`dapr`, `keycloak`, `redis`, `session-broker`) in dependency order.
+**Option B — ApplicationSet (single file):**
+
+```bash
+kubectl apply -f gitops/bootstrap.yaml
+```
+
+Either way, Argo CD discovers and syncs all child Applications (`dapr`, `keycloak`, `redis`, `session-broker`). The ApplicationSet requires the **applicationset-controller**, which ships with the default Argo CD install.
 
 ## Verify
 
