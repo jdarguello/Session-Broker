@@ -32,6 +32,14 @@ spec:
               value: "redis"
             - name: APP_ENV
               value: "production"
+            # ⚠️ DEMO ONLY — plaintext throwaway AES-256 key (base64 of 32 bytes).
+            # Committed so the writer/reader can encrypt/decrypt token material for
+            # the ArgoCon demo without an out-of-band Secret. This is an explicitly
+            # accepted demo gap (same category as the trusted /auth/callback/cache
+            # write path). DO NOT use for anything real. At go-live, delete this and
+            # source it from a `session-broker-secret` via secretKeyRef.
+            - name: TOKEN_ENCRYPTION_KEY
+              value: "lIlY2h9S1NPc2+QqFnNx4Wz9TPuPXzHiW0InHJURpNc="
           readinessProbe:
             httpGet:
               path: /health

@@ -94,6 +94,18 @@ kubectl create secret generic keycloak-admin-secret \
   -n keycloak --dry-run=client -o yaml | kubectl apply -f -
 ```
 
+### Token encryption key (demo gap)
+
+The broker encrypts the cached token set with AES-256-GCM and requires
+`TOKEN_ENCRYPTION_KEY` (base64 of a 32-byte key). **For the ArgoCon demo this is a
+plaintext throwaway value committed directly in the Deployment env** ([`gitops/session-broker/base/deployment.yaml`](https://github.com/jdarguello/Session-Broker/blob/main/gitops/session-broker/base/deployment.yaml)),
+so no extra secret is needed to bring the writer/reader up.
+
+This is an **explicitly accepted demo gap** — the same category as the trusted
+`POST /auth/callback/cache` write path. At go-live the key moves out of the
+manifest into a pre-created `session-broker-secret` consumed via `secretKeyRef`,
+and the committed value is rotated out.
+
 ## Bootstrap
 
 Pick **one** of the two equivalent entry points (do not apply both — they create the same four Applications and would collide).
