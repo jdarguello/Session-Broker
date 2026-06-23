@@ -1,9 +1,10 @@
+import asyncio
 import base64
 import json
 import logging
 import os
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -345,3 +346,90 @@ def test_callback_keycloak_failure_returns_502(
 
     resp = client.get("/auth/callback?code=bad-code&state=nonce-abc")
     assert resp.status_code == 502
+
+
+# ── exchange_code_for_tokens: back-channel URL selection ─────────────────────
+
+
+def _make_mock_httpx_client(token_response: dict):
+    """
+    Build a mock for `async with httpx.AsyncClient(...) as client:` that
+    captures the URL passed to client.post() and returns a fake token response.
+    """
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock(return_value=None)
+    mock_resp.json = MagicMock(return_value=token_response)
+
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(return_value=mock_resp)
+
+    # Support `async with httpx.AsyncClient(...) as client:`
+    mock_async_ctx = MagicMock()
+    mock_async_ctx.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_async_ctx.__aexit__ = AsyncMock(return_value=False)
+
+    return mock_async_ctx, mock_client
+
+
+def test_exchange_code_uses_explicit_keycloak_token_url(monkeypatch):
+    """
+    EXPLICIT path: when KEYCLOAK_TOKEN_URL is set, exchange_code_for_tokens
+    must POST to that URL — not to the issuer-derived URL.
+    """
+    internal_url = (
+        "http://keycloak.keycloak.svc.cluster.local"
+        "/realms/enterpriseclaw/protocol/openid-connect/token"
+    )
+    # Set a DIFFERENT external issuer URL to prove the internal one is chosen.
+    monkeypatch.setenv("KEYCLOAK_TOKEN_URL", internal_url)
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.example.com/realms/demo")
+    monkeypatch.setenv("KEYCLOAK_CLIENT_ID", "session-broker")
+    monkeypatch.setenv("KEYCLOAK_CLIENT_SECRET", "s3cr3t")
+    monkeypatch.setenv("KEYCLOAK_REDIRECT_URI", "https://broker.example.com/auth/callback")
+
+    token_resp = {
+        "access_token": "at",
+        "refresh_token": "rt",
+        "id_token": "it",
+    }
+    mock_ctx, mock_client = _make_mock_httpx_client(token_resp)
+
+    from app.services import oauth_service
+
+    with patch.object(oauth_service.httpx, "AsyncClient", return_value=mock_ctx):
+        asyncio.run(oauth_service.exchange_code_for_tokens("code-abc", "verifier-xyz"))
+
+    # The POST must have gone to the in-cluster token URL, not the external one.
+    called_url = mock_client.post.call_args[0][0]
+    assert called_url == internal_url
+    assert "keycloak.example.com" not in called_url
+
+
+def test_exchange_code_falls_back_to_issuer_url(monkeypatch):
+    """
+    FALLBACK path: when KEYCLOAK_TOKEN_URL is unset, exchange_code_for_tokens
+    must derive the token URL from KEYCLOAK_ISSUER_URL.
+    """
+    monkeypatch.delenv("KEYCLOAK_TOKEN_URL", raising=False)
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.example.com/realms/demo")
+    monkeypatch.setenv("KEYCLOAK_CLIENT_ID", "session-broker")
+    monkeypatch.setenv("KEYCLOAK_CLIENT_SECRET", "s3cr3t")
+    monkeypatch.setenv("KEYCLOAK_REDIRECT_URI", "https://broker.example.com/auth/callback")
+
+    expected_url = (
+        "https://keycloak.example.com/realms/demo/protocol/openid-connect/token"
+    )
+    token_resp = {
+        "access_token": "at",
+        "refresh_token": "rt",
+        "id_token": "it",
+    }
+    mock_ctx, mock_client = _make_mock_httpx_client(token_resp)
+
+    from app.services import oauth_service
+
+    with patch.object(oauth_service.httpx, "AsyncClient", return_value=mock_ctx):
+        asyncio.run(oauth_service.exchange_code_for_tokens("code-xyz", "verifier-abc"))
+
+    called_url = mock_client.post.call_args[0][0]
+    assert called_url == expected_url
