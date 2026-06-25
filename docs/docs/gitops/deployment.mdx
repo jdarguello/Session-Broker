@@ -215,9 +215,9 @@ curl -s -X POST http://localhost:8000/auth/login/start \
 #    (local user `alice`, or "Sign in with Google" once the IdP is wired).
 # 3) The browser lands on http://localhost:8000/auth/callback and the broker
 #    stores the encrypted token set keyed by slack:U-DEMO-001.
-# 4) Resolve the cached access token + claims:
+# 4) Resolve the cached access token + claims (Slack ID is passed as a header):
 curl -s -X POST http://localhost:8000/identity/resolve \
-  -H 'content-type: application/json' -d '{"slack_user_id":"U-DEMO-001"}'
+  -H 'X-Slack-User-Id: U-DEMO-001'
 ```
 
 The `localhost` URLs work because the browser and the tunnel endpoints live on the
