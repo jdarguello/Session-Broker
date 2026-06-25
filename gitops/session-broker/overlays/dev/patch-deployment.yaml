@@ -9,9 +9,28 @@ spec:
     spec:
       containers:
         - name: session-broker
+          # Strategic-merge on env[] (merge key = name): the entries below
+          # OVERRIDE the same-named vars from base/deployment.yaml; all other
+          # base env (KEYCLOAK_CLIENT_ID/SECRET, KEYCLOAK_TOKEN_URL, scopes,
+          # TOKEN_ENCRYPTION_KEY, ...) are inherited unchanged.
           env:
             - name: APP_ENV
               value: "development"
+            # --- Local (kubeadm-in-UTM) front-channel override ---
+            # This dev overlay models the LOCAL demo cluster, which has no AWS
+            # ALB. Browser reachability is provided by an SSH tunnel that maps
+            # the user's Mac localhost:8080 -> Keycloak and localhost:8000 ->
+            # this broker. Both URLs below are FRONT-CHANNEL: they are only ever
+            # dereferenced by the user's browser (OAuth redirects are 302s to
+            # the user-agent, not server-to-server calls), so localhost is
+            # correct here. The BACK-CHANNEL code->token exchange still uses the
+            # in-cluster KEYCLOAK_TOKEN_URL inherited from base (unchanged).
+            # The broker does not validate token `iss`, so the front/back-channel
+            # host mismatch is harmless. See docs/gitops/deployment.mdx (Stage B).
+            - name: KEYCLOAK_ISSUER_URL
+              value: "http://localhost:8080/realms/enterpriseclaw"
+            - name: KEYCLOAK_REDIRECT_URI
+              value: "http://localhost:8000/auth/callback"
           resources:
             requests:
               cpu: "50m"

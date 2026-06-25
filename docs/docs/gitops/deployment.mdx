@@ -92,6 +92,15 @@ kubectl create secret generic redis-secret \
 kubectl create secret generic keycloak-admin-secret \
   --from-literal=admin-password=<your-password> \
   -n keycloak --dry-run=client -o yaml | kubectl apply -f -
+
+# OAuth confidential-client secret (write path). The broker sources
+# KEYCLOAK_CLIENT_SECRET from this Secret via secretKeyRef. The value MUST equal
+# the secret generated for the `session-broker` client in the Keycloak realm
+# (see "Keycloak realm setup" below). Missing this Secret is a hard failure:
+# the pod stays in CreateContainerConfigError / CrashLoopBackOff.
+kubectl create secret generic session-broker-secret \
+  --from-literal=keycloak-client-secret=<client-secret-from-keycloak> \
+  -n session-broker --dry-run=client -o yaml | kubectl apply -f -
 ```
 
 ### Token encryption key (demo gap)
@@ -136,11 +145,82 @@ kubectl get pods -n redis
 
 ## Keycloak realm setup
 
-After Keycloak is running, create the realm and client via the Admin UI or the REST API:
+The broker is a **confidential OAuth client** that performs the `code→token`
+exchange itself (see [Identity Correlation & Write Path](../architecture/dapr-keycloak)).
+After Keycloak is running, configure the realm via the Admin UI or `kcadm.sh`:
 
-1. Navigate to the Keycloak admin console
-2. Create realm: `session-broker`
-3. Create client: `session-broker-client` (public, no client authentication)
-4. Create a test user and assign roles
+1. **Realm:** `enterpriseclaw`.
+2. **Client:** `session-broker` — **confidential** (client authentication ON),
+   standard flow ON, PKCE `S256`. Register both redirect URIs:
+   - `https://broker.session-broker.example.com/auth/callback` (prod / ALB)
+   - `http://localhost:8000/auth/callback` (local tunnel — see Stage B below)
 
-The Dapr bearer middleware will start validating tokens against the realm's JWKS endpoint automatically.
+   Copy the generated client secret into the `session-broker-secret` Secret
+   (`keycloak-client-secret` key) created above.
+3. **Identity provider (optional, for the Google demo narrative):** add a
+   `google` OpenID Connect IdP. Its broker redirect URI —
+   `http://localhost:8080/realms/enterpriseclaw/broker/google/endpoint` (local)
+   — must be registered byte-for-byte in the Google Cloud OAuth client.
+4. **Test user:** a local realm user (e.g. `alice`) with a password is enough to
+   exercise the flow without Google.
+
+> The Dapr **bearer middleware is intentionally excluded** from the demo pipeline
+> (see [`base/kustomization.yaml`](https://github.com/jdarguello/Session-Broker/blob/main/gitops/session-broker/base/kustomization.yaml));
+> the broker validates provenance by minting tokens via the `code` exchange, not
+> by validating an inbound bearer.
+
+## Stage B: running the OAuth write path locally (no AWS ALB)
+
+The production write path exposes `GET /auth/callback` through an **AWS ALB
+Ingress**, which has no address on the local kubeadm-in-UTM cluster. You do **not**
+need a cloud load balancer to run the full browser flow locally — only the user's
+**browser** ever dereferences the front-channel URLs (OAuth redirects are HTTP
+`302`s to the user-agent, never server-to-server calls). An **SSH tunnel** from the
+Mac to the cluster is sufficient.
+
+**1. Front-channel env (committed in the dev overlay).**
+[`overlays/dev/patch-deployment.yaml`](https://github.com/jdarguello/Session-Broker/blob/main/gitops/session-broker/overlays/dev/patch-deployment.yaml)
+points the broker at `localhost` for the two browser-facing URLs, while the
+back-channel `code→token` exchange keeps the in-cluster `KEYCLOAK_TOKEN_URL`
+inherited from base:
+
+| Var | Value (dev) | Channel |
+|---|---|---|
+| `KEYCLOAK_ISSUER_URL` | `http://localhost:8080/realms/enterpriseclaw` | front (browser) |
+| `KEYCLOAK_REDIRECT_URI` | `http://localhost:8000/auth/callback` | front (browser) |
+| `KEYCLOAK_TOKEN_URL` | `http://keycloak.keycloak.svc.cluster.local/realms/enterpriseclaw/protocol/openid-connect/token` | back (broker pod) |
+
+The broker does **not** validate the token `iss`, so the front-channel
+(`localhost`) vs back-channel (`svc.cluster.local`) host mismatch is harmless.
+
+**2. Tunnel Keycloak and the broker to the Mac browser.** Map the Mac's
+`localhost:8080` to Keycloak and `localhost:8000` to the broker (ports must match
+the env/redirect-URI registrations exactly):
+
+```bash
+# On the cluster node (binds the two services to the node's localhost):
+ssh controlplane kubectl port-forward -n keycloak       svc/keycloak       8080:80 &
+ssh controlplane kubectl port-forward -n session-broker svc/session-broker 8000:80 &
+# Bridge them to the Mac:
+ssh -N -L 8080:localhost:8080 -L 8000:localhost:8000 controlplane
+```
+
+**3. Drive the flow:**
+
+```bash
+# 1) Mint the binding + authorize URL (internal-only endpoint)
+curl -s -X POST http://localhost:8000/auth/login/start \
+  -H 'content-type: application/json' -d '{"slack_user_id":"U-DEMO-001"}'
+# 2) Open the returned authorize URL in the Mac browser, log in
+#    (local user `alice`, or "Sign in with Google" once the IdP is wired).
+# 3) The browser lands on http://localhost:8000/auth/callback and the broker
+#    stores the encrypted token set keyed by slack:U-DEMO-001.
+# 4) Resolve the cached access token + claims:
+curl -s -X POST http://localhost:8000/identity/resolve \
+  -H 'content-type: application/json' -d '{"slack_user_id":"U-DEMO-001"}'
+```
+
+The `localhost` URLs work because the browser and the tunnel endpoints live on the
+same machine (the Mac). The only hops that need real network reachability are the
+two back-channel calls — Keycloak→Google (needs node egress) and broker→Keycloak
+(in-cluster) — neither of which targets `localhost`.
