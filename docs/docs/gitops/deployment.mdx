@@ -96,11 +96,23 @@ kubectl create secret generic keycloak-admin-secret \
 # OAuth confidential-client secret (write path). The broker sources
 # KEYCLOAK_CLIENT_SECRET from this Secret via secretKeyRef. The value MUST equal
 # the secret generated for the `session-broker` client in the Keycloak realm
-# (see "Keycloak realm setup" below). Missing this Secret is a hard failure:
-# the pod stays in CreateContainerConfigError / CrashLoopBackOff.
+# (see "Declarative realm configuration" below). Missing this Secret is a hard
+# failure: the pod stays in CreateContainerConfigError / CrashLoopBackOff.
 kubectl create secret generic session-broker-secret \
   --from-literal=keycloak-client-secret=<client-secret-from-keycloak> \
   -n session-broker --dry-run=client -o yaml | kubectl apply -f -
+
+# Realm-config secrets (consumed by keycloak-config-cli via $(env:...) substitution,
+# see "Declarative realm configuration" below). SESSION_BROKER_CLIENT_SECRET MUST
+# hold the SAME value as session-broker-secret/keycloak-client-secret above — the
+# broker and Keycloak must agree on the client secret. GOOGLE_CLIENT_SECRET is the
+# Google Cloud OAuth client secret (Keycloak masks it on read, so it cannot be
+# recovered from the cluster — supply it from the Google Cloud Console).
+kubectl create secret generic keycloak-realm-secrets \
+  --from-literal=SESSION_BROKER_CLIENT_SECRET=<same-as-session-broker-secret> \
+  --from-literal=GOOGLE_CLIENT_SECRET=<google-cloud-oauth-client-secret> \
+  --from-literal=ALICE_PASSWORD=<demo-local-user-password> \
+  -n keycloak --dry-run=client -o yaml | kubectl apply -f -
 ```
 
 ### Token encryption key (demo gap)
@@ -143,26 +155,54 @@ kubectl get pods -n keycloak
 kubectl get pods -n redis
 ```
 
-## Keycloak realm setup
+## Declarative realm configuration
 
-The broker is a **confidential OAuth client** that performs the `code→token`
-exchange itself (see [Identity Correlation & Write Path](../architecture/dapr-keycloak)).
-After Keycloak is running, configure the realm via the Admin UI or `kcadm.sh`:
+The `enterpriseclaw` realm is **not** configured by hand. It is reconciled
+declaratively by [keycloak-config-cli](https://github.com/adorsys/keycloak-config-cli),
+which the Bitnami chart bundles and runs as an **in-cluster post-install/post-upgrade
+Job** (a Helm hook). Because the chart is deployed by Argo CD, the realm is driven
+from git on every sync — the desired state lives in
+[`gitops/keycloak/values.yaml`](https://github.com/jdarguello/Session-Broker/blob/main/gitops/keycloak/values.yaml)
+under `keycloakConfigCli.configuration`, not in manual Admin-UI clicks.
 
-1. **Realm:** `enterpriseclaw`.
-2. **Client:** `session-broker` — **confidential** (client authentication ON),
-   standard flow ON, PKCE `S256`. Register both redirect URIs:
-   - `https://broker.session-broker.example.com/auth/callback` (prod / ALB)
-   - `http://localhost:8000/auth/callback` (local tunnel — see Stage B below)
+```
+realm-enterpriseclaw (in values.yaml)
+   └─ Argo syncs the keycloak Helm release
+        └─ chart renders a ConfigMap + a post-upgrade Job
+             └─ keycloak-config-cli applies the realm in-cluster
+```
 
-   Copy the generated client secret into the `session-broker-secret` Secret
-   (`keycloak-client-secret` key) created above.
-3. **Identity provider (optional, for the Google demo narrative):** add a
-   `google` OpenID Connect IdP. Its broker redirect URI —
-   `http://localhost:8080/realms/enterpriseclaw/broker/google/endpoint` (local)
-   — must be registered byte-for-byte in the Google Cloud OAuth client.
-4. **Test user:** a local realm user (e.g. `alice`) with a password is enough to
-   exercise the flow without Google.
+**Additive / no-delete mode.** The Job runs with `IMPORT_MANAGED_*=no-delete`
+(set via `keycloakConfigCli.extraEnvVars`), so it layers the catalog onto the realm
+and **never prunes** Keycloak built-ins or unrelated clients. Changes flow from git;
+it reconciles on each sync that changes the values file (Argo cannot see *inside*
+Keycloak's database, so a manual Admin-UI edit is overwritten on the next sync, not
+reverted instantly).
+
+**Secrets** are injected via `$(env:...)` substitution from the pre-created
+`keycloak-realm-secrets` Secret (above) — never committed. `SESSION_BROKER_CLIENT_SECRET`
+**must equal** `session-broker-secret/keycloak-client-secret`, or the broker and Keycloak
+will disagree on the client secret.
+
+The catalog (see the [authorization model](../architecture/dapr-keycloak)):
+
+| Resource | What it defines |
+|---|---|
+| **Client** `session-broker` | confidential OAuth client, PKCE `S256`, redirect URIs (prod ALB + `localhost:8000` tunnel), `groups` token mapper, `offline_access` |
+| **Agent clients** `issue-tracker`, `infra-provisioner` | `bearerOnly` resource clients holding client roles + audience (no login flow) |
+| **Realm roles** | `agent-user` (baseline), `senior-engineer` (composite → `infra-provisioner:db:provision:dev`) |
+| **Groups** | `/engineering` (baseline: file issues, read infra) → `/engineering/seniors` (inherits + `senior-engineer`) |
+| **Identity provider** `google` | Keycloak's upstream IdP; new logins land in `/engineering` via a hardcoded-group mapper |
+| **Demo users** | `alice` (junior, `/engineering`); `juandavidarguello@gmail.com` (senior, `/engineering/seniors`, federated to Google) |
+
+> **External boundary — Google Cloud stays manual.** keycloak-config-cli configures
+> *Keycloak's* side of the federation (the `google` IdP entry). The **Google Cloud
+> OAuth client itself** — and its authorized redirect URI
+> `http://localhost:8080/realms/enterpriseclaw/broker/google/endpoint` (local) /
+> `https://<keycloak-host>/realms/enterpriseclaw/broker/google/endpoint` (prod) —
+> lives in the Google Cloud Console, outside this repo's GitOps boundary (same
+> category as the AWS ALB). Only the Google `clientId` is committed; the
+> `clientSecret` is supplied via `keycloak-realm-secrets`.
 
 > The Dapr **bearer middleware is intentionally excluded** from the demo pipeline
 > (see [`base/kustomization.yaml`](https://github.com/jdarguello/Session-Broker/blob/main/gitops/session-broker/base/kustomization.yaml));

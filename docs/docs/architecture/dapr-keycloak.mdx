@@ -53,7 +53,7 @@ EnterpriseClaw gateway
 | Scopes | `openid email profile offline_access` |
 | PKCE method | `S256` |
 | Grant type | `authorization_code` |
-| Realm | `session-broker` |
+| Realm | `enterpriseclaw` |
 
 The `offline_access` scope causes Keycloak to issue a refresh token alongside the access token.
 
@@ -146,6 +146,30 @@ The reader must never contact Keycloak. Workload trust is enforced by mTLS in En
 
 ---
 
+## Authorization model — claims the brokered token carries
+
+The broker **does not enforce** permissions; it brokers a token that *carries* them. The realm encodes the user's authorization context as standard OIDC claims, and **downstream EnterpriseClaw agents enforce** on those claims. The model is configured declaratively (see [Declarative realm configuration](../gitops/deployment)):
+
+- **Groups** model org placement: `/engineering` (every authenticated engineer) → `/engineering/seniors` (inherits `/engineering`, adds senior capabilities).
+- **Realm roles**: `agent-user` (baseline marker for authenticated users) and `senior-engineer` (composite → `infra-provisioner:db:provision:dev`).
+- **Per-agent client roles**: each downstream agent is a `bearerOnly` Keycloak client holding its own roles — `issue-tracker` (`issue:create`, `issue:read`) and `infra-provisioner` (`infra:read`, `db:provision:dev`, `db:provision:prod`). They appear under `resource_access.<agent>.roles`.
+
+One authentication yields one cached token carrying the user's roles for **many** downstream agents:
+
+| Claim | `alice` (junior, `/engineering`) | `juandavidarguello@…` (senior, `/engineering/seniors`) |
+|---|---|---|
+| `groups` | `[/engineering]` | `[/engineering, /engineering/seniors]` |
+| `realm_access.roles` | `[agent-user, …]` | `[agent-user, senior-engineer, …]` |
+| `resource_access.issue-tracker.roles` | `[issue:create, issue:read]` | `[issue:create, issue:read]` |
+| `resource_access.infra-provisioner.roles` | `[infra:read]` | `[infra:read, db:provision:dev]` |
+| File an issue? | ✅ | ✅ |
+| Provision a **dev** DB? | ❌ | ✅ |
+| Provision a **prod** DB? | ❌ | ❌ (`db:provision:prod` granted to nobody) |
+
+`POST /identity/resolve` returns the access token, so the caller and any downstream agent see these claims directly. The broker echoes them but makes **no** allow/deny decision of its own — keying the cache stays on the Slack user ID, and the read path remains Keycloak-free.
+
+---
+
 ## Dapr integration
 
 ### State store — Redis
@@ -203,15 +227,19 @@ GET    /v1.0/invoke/session-broker/method/health
 
 ## Keycloak realm setup
 
+The realm is configured **declaratively** by keycloak-config-cli — see
+[Declarative realm configuration](../gitops/deployment) for the full catalog and
+the `keycloak-realm-secrets` requirement.
+
 | Setting | Value |
 |---|---|
-| Realm | `session-broker` |
+| Realm | `enterpriseclaw` |
 | Client ID | `session-broker` |
 | Client type | Confidential (client secret required) |
 | Client scopes | `openid email profile offline_access` |
 | IdP federation | Google Workspace (configured inside Keycloak) |
-| `redirect_uri` | `https://<alb-hostname>/auth/callback` |
-| JWKS endpoint | `http://keycloak.keycloak.svc.cluster.local/realms/session-broker/protocol/openid-connect/certs` |
+| `redirect_uri` | `https://<alb-hostname>/auth/callback` + `http://localhost:8000/auth/callback` (local tunnel) |
+| JWKS endpoint | `http://keycloak.keycloak.svc.cluster.local/realms/enterpriseclaw/protocol/openid-connect/certs` |
 
 ---
 

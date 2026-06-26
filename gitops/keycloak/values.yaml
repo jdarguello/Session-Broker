@@ -46,32 +46,12 @@ ingress:
   enabled: false  # enable and configure for external access
 
 # ---------------------------------------------------------------------------
-# Realm / client bootstrap — MANUAL STEP, out-of-band after chart deploy
+# Realm / client bootstrap — now DECLARATIVE via keycloak-config-cli (below)
 # ---------------------------------------------------------------------------
-# The Bitnami Keycloak chart does not support declarative realm-client
-# configuration via Helm values, so the broker's confidential client must be
-# registered manually (or via a post-deploy Keycloak Admin API call / realm
-# import Job).  Required settings for the ArgoCon demo:
-#
-#   Realm:          enterpriseclaw
-#   Client ID:      session-broker
-#   Client type:    confidential (OpenID Connect)
-#   Client secret:  generated at registration; store in the "session-broker-secret"
-#                   K8s Secret under key "keycloak-client-secret" (provisioned
-#                   out-of-band, same pattern as keycloak-admin-secret —
-#                   do NOT commit the plaintext secret here)
-#   Standard flow:  enabled  (Authorization Code)
-#   Direct access:  disabled
-#   PKCE algorithm: S256  (Proof Key for Code Exchange — required)
-#   Redirect URI:   https://broker.session-broker.example.com/auth/callback
-#   Scopes:         openid, email, profile, offline_access
-#                   (offline_access issues a refresh token — required for the
-#                    demo token-storage contract)
-#
-# Google Workspace federation: configure a "google" Identity Provider in the
-# "enterpriseclaw" realm pointing at the Google OAuth 2.0 endpoints for your
-# Workspace domain. Keycloak is the only IdP the broker's code ever calls;
-# Google is Keycloak's upstream, transparent to the broker.
+# The realm (clients, roles, groups, the Google IdP, demo users) is no longer a
+# manual Admin-UI / kcadm step: it is reconciled from `keycloakConfigCli.configuration`
+# on every Argo CD sync. See the keycloakConfigCli block at the bottom of this file
+# and docs/docs/gitops/deployment.mdx ("Declarative realm configuration").
 
 # ---------------------------------------------------------------------------
 # Front-channel vs back-channel hostname (IMPORTANT for token `iss`)
@@ -89,3 +69,207 @@ ingress:
 # `iss` and fail audience/issuer validation downstream.
 # (Bitnami exposes this via e.g. extraEnvVars KC_HOSTNAME / KC_HOSTNAME_URL, or
 #  the chart's hostname settings -- configure to the external host at deploy.)
+
+# ===========================================================================
+# keycloak-config-cli — declarative realm configuration (GitOps)
+# ===========================================================================
+# Runs as an in-cluster post-install/post-upgrade Job (a Helm hook the chart
+# renders), so Argo CD drives it on every sync that changes this values file —
+# git is the source of truth for the realm, NOT manual Admin-UI clicks.
+#
+# Mode: ADDITIVE / no-delete (IMPORT_MANAGED_*=no-delete) so it layers the
+# enterpriseclaw catalog onto the realm WITHOUT pruning Keycloak built-ins or
+# unrelated clients. Secrets are injected via $(env:...) substitution from the
+# pre-created `keycloak-realm-secrets` Secret — never committed here.
+#
+# Required out-of-band Secret `keycloak-realm-secrets` (namespace keycloak):
+#   SESSION_BROKER_CLIENT_SECRET  — MUST equal session-broker-secret/keycloak-client-secret
+#                                   (the broker and Keycloak must agree on the client secret)
+#   GOOGLE_CLIENT_SECRET          — the Google Cloud OAuth client secret (from Google Console)
+#   ALICE_PASSWORD                — demo local-user password
+keycloakConfigCli:
+  enabled: true
+  image:
+    registry: docker.io
+    repository: bitnamilegacy/keycloak-config-cli
+    tag: 6.1.6-debian-12-r3
+  backoffLimit: 2
+  extraEnvVars:
+    - name: IMPORT_VARSUBSTITUTION_ENABLED
+      value: "true"
+    # Additive only: never delete realm resources absent from this import.
+    - name: IMPORT_MANAGED_CLIENT
+      value: "no-delete"
+    - name: IMPORT_MANAGED_ROLE
+      value: "no-delete"
+    - name: IMPORT_MANAGED_CLIENTSCOPE
+      value: "no-delete"
+    - name: IMPORT_MANAGED_GROUP
+      value: "no-delete"
+    - name: IMPORT_MANAGED_IDENTITYPROVIDER
+      value: "no-delete"
+    - name: IMPORT_MANAGED_IDENTITYPROVIDERMAPPER
+      value: "no-delete"
+  extraEnvVarsSecret: keycloak-realm-secrets
+  configuration:
+    enterpriseclaw.yaml: |
+      # enterpriseclaw realm — declarative source of truth (keycloak-config-cli).
+      # Secrets injected via env substitution; applied in additive / no-delete mode.
+      realm: enterpriseclaw
+      enabled: true
+
+      # ----- Roles -----
+      roles:
+        realm:
+          - name: agent-user
+            description: "Authenticated platform user (baseline). Group-1 users hold this; unauthenticated users never do."
+          - name: senior-engineer
+            description: "Senior engineer — may provision dev infrastructure."
+            composite: true
+            composites:
+              client:
+                infra-provisioner:
+                  - "db:provision:dev"
+        client:
+          issue-tracker:
+            - name: "issue:create"
+              description: "Create issues"
+            - name: "issue:read"
+              description: "Read issues"
+          infra-provisioner:
+            - name: "infra:read"
+              description: "Read infrastructure state"
+            - name: "db:provision:dev"
+              description: "Provision databases in the dev environment"
+            - name: "db:provision:prod"
+              description: "Provision databases in prod (granted to NOBODY in the demo — shows the stricter tier)"
+
+      # ----- Groups (child inherits parent's effective roles) -----
+      #   /engineering          -> everyone authenticated: file issues, read infra
+      #   /engineering/seniors  -> inherits above + senior-engineer (=> db:provision:dev)
+      groups:
+        - name: engineering
+          realmRoles:
+            - agent-user
+          clientRoles:
+            issue-tracker:
+              - "issue:create"
+              - "issue:read"
+            infra-provisioner:
+              - "infra:read"
+          subGroups:
+            - name: seniors
+              realmRoles:
+                - senior-engineer
+
+      # ----- Clients -----
+      #   session-broker    -> confidential OAuth login client (code->token exchange)
+      #   issue-tracker     -> downstream agent, resource-only (bearer): roles + audience
+      #   infra-provisioner -> downstream agent, resource-only (bearer): roles + audience
+      clients:
+        - clientId: session-broker
+          enabled: true
+          protocol: openid-connect
+          publicClient: false
+          standardFlowEnabled: true
+          directAccessGrantsEnabled: false
+          serviceAccountsEnabled: false
+          fullScopeAllowed: true
+          secret: "$(env:SESSION_BROKER_CLIENT_SECRET)"
+          redirectUris:
+            - "http://localhost:8000/auth/callback"
+            - "https://broker.session-broker.example.com/auth/callback"
+          webOrigins:
+            - "https://broker.session-broker.example.com"
+          attributes:
+            pkce.code.challenge.method: "S256"
+          defaultClientScopes:
+            - web-origins
+            - acr
+            - roles
+            - profile
+            - basic
+            - email
+          optionalClientScopes:
+            - address
+            - phone
+            - offline_access
+            - microprofile-jwt
+          protocolMappers:
+            # group membership (full path) into the tokens so the brokered token
+            # visibly carries the user's org placement.
+            - name: groups
+              protocol: openid-connect
+              protocolMapper: oidc-group-membership-mapper
+              config:
+                "full.path": "true"
+                "access.token.claim": "true"
+                "id.token.claim": "true"
+                "userinfo.token.claim": "true"
+                "claim.name": "groups"
+        - clientId: issue-tracker
+          enabled: true
+          protocol: openid-connect
+          bearerOnly: true
+          description: "Downstream agent (resource client): file/read issues. Holds client roles + audience; no login flow."
+        - clientId: infra-provisioner
+          enabled: true
+          protocol: openid-connect
+          bearerOnly: true
+          description: "Downstream agent (resource client): infrastructure provisioning. Holds client roles + audience; no login flow."
+
+      # ----- Identity provider: Google (Keycloak's upstream IdP; transparent to the broker) -----
+      identityProviders:
+        - alias: google
+          providerId: google
+          enabled: true
+          trustEmail: true
+          storeToken: false
+          addReadTokenRoleOnCreate: false
+          authenticateByDefault: false
+          linkOnly: false
+          updateProfileFirstLoginMode: "off"
+          firstBrokerLoginFlowAlias: "first broker login"
+          config:
+            syncMode: "IMPORT"
+            clientId: "371399668397-8bobu0pthqfbck7gucb59uhl9njdnjs7.apps.googleusercontent.com"
+            clientSecret: "$(env:GOOGLE_CLIENT_SECRET)"
+
+      # New Google logins land in /engineering (baseline). syncMode INHERIT => applies on
+      # user creation only, so the pre-seeded senior below is never downgraded.
+      identityProviderMappers:
+        - name: default-engineering-group
+          identityProviderAlias: google
+          identityProviderMapper: "hardcoded-group-idp-mapper"
+          config:
+            group: "/engineering"
+            syncMode: "INHERIT"
+
+      # ----- Demo users -----
+      #   alice                       -> JUNIOR: local password user in /engineering
+      #   juandavidarguello@gmail.com -> SENIOR: pinned to /engineering/seniors, linked to Google
+      users:
+        - username: alice
+          enabled: true
+          email: "alice@enterpriseclaw.test"
+          emailVerified: true
+          firstName: Alice
+          lastName: Engineer
+          credentials:
+            - type: password
+              value: "$(env:ALICE_PASSWORD)"
+              temporary: false
+          groups:
+            - "/engineering"
+        - username: "juandavidarguello@gmail.com"
+          enabled: true
+          email: "juandavidarguello@gmail.com"
+          emailVerified: true
+          firstName: "Juan David"
+          lastName: "Arguello"
+          federatedIdentities:
+            - identityProvider: google
+              userId: "105554187258653745268"
+              userName: "juandavidarguello@gmail.com"
+          groups:
+            - "/engineering/seniors"
