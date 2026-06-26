@@ -83,10 +83,14 @@ ingress:
 # pre-created `keycloak-realm-secrets` Secret — never committed here.
 #
 # Required out-of-band Secret `keycloak-realm-secrets` (namespace keycloak):
-#   SESSION_BROKER_CLIENT_SECRET  — MUST equal session-broker-secret/keycloak-client-secret
-#                                   (the broker and Keycloak must agree on the client secret)
-#   GOOGLE_CLIENT_SECRET          — the Google Cloud OAuth client secret (from Google Console)
-#   ALICE_PASSWORD                — demo local-user password
+#   SESSION_BROKER_CLIENT_SECRET    — MUST equal session-broker-secret/keycloak-client-secret
+#                                     (the broker and Keycloak must agree on the client secret)
+#   GOOGLE_CLIENT_SECRET            — the Google Cloud OAuth client secret (from Google Console)
+#   ALICE_PASSWORD                  — demo local-user password
+#   KAGENT_CONTROLLER_CLIENT_SECRET — confidential secret for the kagent-controller service-account
+#                                     client (below). The EnterpriseClaw kagent session reads this
+#                                     same key from the cluster Secret to mint its discovery token,
+#                                     so no value has to be shared between the two sessions.
 keycloakConfigCli:
   enabled: true
   image:
@@ -217,6 +221,56 @@ keycloakConfigCli:
           protocol: openid-connect
           bearerOnly: true
           description: "Downstream agent (resource client): infrastructure provisioning. Holds client roles + audience; no login flow."
+        # kagent-controller -> workload identity (NOT a human) for the EnterpriseClaw
+        #   kagent controller. Its tool-discovery (tools/list through agentgateway) is
+        #   tokenless, but the MCP routes run in Strict JWT mode, so discovery needs a
+        #   real Keycloak-signed bearer that satisfies BOTH routes at once: audience
+        #   issue-tracker + role issue:create (for /issues) AND audience infra-provisioner
+        #   + role db:provision:dev (for /provisioning). A client_credentials service
+        #   account carrying exactly those two capabilities + both audiences provides it.
+        - clientId: kagent-controller
+          enabled: true
+          protocol: openid-connect
+          # NOTE: keep description <= 255 chars (Keycloak CLIENT.DESCRIPTION is varchar(255));
+          # the full rationale lives in the comment above, not in the DB-backed field.
+          description: "kagent controller workload identity (service account, not a human): client_credentials token for tokenless MCP tool-discovery through agentgateway under Strict JWT. Holds both downstream audiences + the two capability roles."
+          publicClient: false
+          standardFlowEnabled: false
+          directAccessGrantsEnabled: false
+          serviceAccountsEnabled: true          # client_credentials grant
+          fullScopeAllowed: true                # service-account client roles flow into resource_access
+          secret: "$(env:KAGENT_CONTROLLER_CLIENT_SECRET)"
+          attributes:
+            # DEMO/DRY-RUN ONLY: bump the access-token lifespan so the static discovery
+            # Secret doesn't expire mid-demo. 10h (realm ssoSessionMaxLifespan default) is
+            # the EFFECTIVE ceiling for a client_credentials token — Keycloak caps the
+            # access token at the service-account session max. Going higher (e.g. 24h) would
+            # require raising the realm-wide ssoSessionMaxLifespan, which would also lengthen
+            # every human's SSO session — wrong trade for a workload cred. 10h covers a demo
+            # day; production should REFRESH the token into the Secret, not lengthen it.
+            access.token.lifespan: "36000"      # 10h (== realm session-max ceiling)
+          protocolMappers:
+            # Put BOTH downstream audiences in `aud` explicitly (don't rely on audience
+            # resolution from resource_access).
+            - name: aud-issue-tracker
+              protocol: openid-connect
+              protocolMapper: oidc-audience-mapper
+              config:
+                "included.client.audience": "issue-tracker"
+                "access.token.claim": "true"
+                "id.token.claim": "false"
+            - name: aud-infra-provisioner
+              protocol: openid-connect
+              protocolMapper: oidc-audience-mapper
+              config:
+                "included.client.audience": "infra-provisioner"
+                "access.token.claim": "true"
+                "id.token.claim": "false"
+          # NOTE: the service account's roles are NOT set here — Keycloak's
+          # ClientRepresentation has no serviceAccountClientRoles field. In
+          # keycloak-config-cli the service account is modeled as the user
+          # `service-account-kagent-controller` (serviceAccountClientId) in the
+          # `users:` block below, where its two capability roles are assigned.
 
       # ----- Identity provider: Google (Keycloak's upstream IdP; transparent to the broker) -----
       identityProviders:
@@ -246,8 +300,12 @@ keycloakConfigCli:
             syncMode: "INHERIT"
 
       # ----- Demo users -----
-      #   alice                       -> JUNIOR: local password user in /engineering
-      #   juandavidarguello@gmail.com -> SENIOR: pinned to /engineering/seniors, linked to Google
+      #   alice                              -> JUNIOR: local password user in /engineering
+      #   juandavidarguello@gmail.com        -> SENIOR: pinned to /engineering/seniors, linked to Google
+      #   service-account-kagent-controller  -> WORKLOAD: the service account of the
+      #       kagent-controller client (not a human). Keycloak auto-creates this user when
+      #       serviceAccountsEnabled=true; keycloak-config-cli matches it by serviceAccountClientId
+      #       and assigns exactly the two capability roles the MCP routes gate on.
       users:
         - username: alice
           enabled: true
@@ -273,3 +331,14 @@ keycloakConfigCli:
               userName: "juandavidarguello@gmail.com"
           groups:
             - "/engineering/seniors"
+        # Service account of the kagent-controller client (auto-created by Keycloak).
+        # Carries ONLY the two capabilities the MCP routes' CEL checks require, so a
+        # single client_credentials token passes both Strict routes for tool-discovery.
+        - username: "service-account-kagent-controller"
+          enabled: true
+          serviceAccountClientId: "kagent-controller"
+          clientRoles:
+            issue-tracker:
+              - "issue:create"
+            infra-provisioner:
+              - "db:provision:dev"

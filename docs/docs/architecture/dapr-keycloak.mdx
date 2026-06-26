@@ -168,6 +168,20 @@ One authentication yields one cached token carrying the user's roles for **many*
 
 `POST /identity/resolve` returns the access token, so the caller and any downstream agent see these claims directly. The broker echoes them but makes **no** allow/deny decision of its own — keying the cache stays on the Slack user ID, and the read path remains Keycloak-free.
 
+### Workload identity — `kagent-controller` (tool-discovery)
+
+Not every token in the realm belongs to a human. The EnterpriseClaw **kagent controller** enumerates each agent's tools (`tools/list`) through agentgateway, but the MCP routes run in **Strict** JWT mode — so even that tokenless discovery call needs a real Keycloak-signed bearer. No user token fits: it must satisfy **both** routes at once (audience `issue-tracker` + `issue:create` for `/issues`, **and** audience `infra-provisioner` + `db:provision:dev` for `/provisioning`).
+
+The realm therefore carries a dedicated **service-account client** `kagent-controller` (confidential, `serviceAccountsEnabled`, **no** login flow). A `client_credentials` grant mints a token for the controller's own identity — `azp = kagent-controller` — carrying exactly the two capabilities both routes gate on and nothing more:
+
+| Claim | Value |
+|---|---|
+| `aud` | `[issue-tracker, infra-provisioner, account]` |
+| `resource_access.issue-tracker.roles` | `[issue:create]` |
+| `resource_access.infra-provisioner.roles` | `[db:provision:dev]` |
+
+Implementation notes: roles are assigned in keycloak-config-cli via the service-account **user** `service-account-kagent-controller` (`serviceAccountClientId: kagent-controller`) — Keycloak's `ClientRepresentation` has no `serviceAccountClientRoles` field. Both audiences are added with explicit `oidc-audience-mapper` mappers. The access-token lifespan is bumped to **10h** (the realm `ssoSessionMaxLifespan` ceiling for a `client_credentials` token — a demo-only convenience; production should refresh the token into its Secret rather than rely on a long-lived one). The client secret comes from `keycloak-realm-secrets/KAGENT_CONTROLLER_CLIENT_SECRET`, which the EnterpriseClaw kagent session reads directly from the cluster to mint and store the discovery token — so no secret value is shared between sessions. This is a **workload** credential the controller holds, never a user's.
+
 ---
 
 ## Dapr integration

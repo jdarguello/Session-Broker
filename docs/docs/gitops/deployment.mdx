@@ -108,10 +108,14 @@ kubectl create secret generic session-broker-secret \
 # broker and Keycloak must agree on the client secret. GOOGLE_CLIENT_SECRET is the
 # Google Cloud OAuth client secret (Keycloak masks it on read, so it cannot be
 # recovered from the cluster — supply it from the Google Cloud Console).
+# KAGENT_CONTROLLER_CLIENT_SECRET is the confidential secret for the kagent-controller
+# service-account client (any strong random value); the EnterpriseClaw kagent session
+# reads this same key from the cluster to mint its tool-discovery token.
 kubectl create secret generic keycloak-realm-secrets \
   --from-literal=SESSION_BROKER_CLIENT_SECRET=<same-as-session-broker-secret> \
   --from-literal=GOOGLE_CLIENT_SECRET=<google-cloud-oauth-client-secret> \
   --from-literal=ALICE_PASSWORD=<demo-local-user-password> \
+  --from-literal=KAGENT_CONTROLLER_CLIENT_SECRET=<strong-random-value> \
   -n keycloak --dry-run=client -o yaml | kubectl apply -f -
 ```
 
@@ -190,6 +194,7 @@ The catalog (see the [authorization model](../architecture/dapr-keycloak)):
 |---|---|
 | **Client** `session-broker` | confidential OAuth client, PKCE `S256`, redirect URIs (prod ALB + `localhost:8000` tunnel), `groups` token mapper, `offline_access` |
 | **Agent clients** `issue-tracker`, `infra-provisioner` | `bearerOnly` resource clients holding client roles + audience (no login flow) |
+| **Workload client** `kagent-controller` | service-account client (`client_credentials`, no login flow) for the EnterpriseClaw kagent controller's tool-discovery; carries both agent audiences + `issue:create` & `db:provision:dev` via its service-account user `service-account-kagent-controller` |
 | **Realm roles** | `agent-user` (baseline), `senior-engineer` (composite → `infra-provisioner:db:provision:dev`) |
 | **Groups** | `/engineering` (baseline: file issues, read infra) → `/engineering/seniors` (inherits + `senior-engineer`) |
 | **Identity provider** `google` | Keycloak's upstream IdP; new logins land in `/engineering` via a hardcoded-group mapper |
