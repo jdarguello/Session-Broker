@@ -67,8 +67,25 @@ ingress:
 # `iss` claim is the external issuer no matter which host received the POST.
 # Otherwise tokens minted over the internal back-channel could carry an internal
 # `iss` and fail audience/issuer validation downstream.
-# (Bitnami exposes this via e.g. extraEnvVars KC_HOSTNAME / KC_HOSTNAME_URL, or
-#  the chart's hostname settings -- configure to the external host at deploy.)
+#
+# We do NOT hardcode the host here (it is tenant-specific). EnterpriseClaw creates
+# a ConfigMap `keycloak-hostnames` in THIS namespace carrying:
+#     KC_HOSTNAME_URL        = https://auth.<tenant-domain>
+#     KC_HOSTNAME_ADMIN_URL  = https://auth.<tenant-domain>
+#     BROKER_EXTERNAL_URL    = https://broker.<tenant-domain>   (used by the realm import below)
+# `extraEnvVarsCM` surfaces those keys as env vars. Keycloak's Quarkus runtime
+# reads raw KC_* env natively, so KC_HOSTNAME_URL drives the front-end/issuer URL
+# -> the discovery `issuer` becomes https://auth.<tenant-domain>/realms/enterpriseclaw.
+# `proxyHeaders: xforwarded` makes Keycloak trust the ALB's X-Forwarded-* (TLS is
+# terminated at the ALB; the pod speaks plain HTTP), so the resolved scheme is https.
+# This chart ships Keycloak 25 (hostname v1), where KC_HOSTNAME_URL / KC_HOSTNAME_ADMIN_URL
+# are valid; the Bitnami entrypoint sets http-enabled=true unconditionally, so no
+# local TLS keystore is needed behind the edge proxy.
+# NOTE: on a bare/local cluster (no EnterpriseClaw) the `keycloak-hostnames` ConfigMap
+# must be pre-created out-of-band (with localhost values for the SSH-tunnel dev flow)
+# or the Keycloak pod stays in CreateContainerConfigError. See docs/gitops/deployment.mdx.
+proxyHeaders: xforwarded
+extraEnvVarsCM: keycloak-hostnames
 
 # ===========================================================================
 # keycloak-config-cli — declarative realm configuration (GitOps)
@@ -115,6 +132,11 @@ keycloakConfigCli:
     - name: IMPORT_MANAGED_IDENTITYPROVIDERMAPPER
       value: "no-delete"
   extraEnvVarsSecret: keycloak-realm-secrets
+  # Surface the tenant ConfigMap into the import Job's env so the realm's
+  # $(env:BROKER_EXTERNAL_URL) reference below resolves at import time
+  # (IMPORT_VARSUBSTITUTION_ENABLED=true). Created by EnterpriseClaw; on a
+  # bare/local cluster it must be pre-created (see docs/gitops/deployment.mdx).
+  extraEnvVarsCM: keycloak-hostnames
   configuration:
     enterpriseclaw.yaml: |
       # enterpriseclaw realm — declarative source of truth (keycloak-config-cli).
@@ -180,11 +202,14 @@ keycloakConfigCli:
           serviceAccountsEnabled: false
           fullScopeAllowed: true
           secret: "$(env:SESSION_BROKER_CLIENT_SECRET)"
+          # Host is tenant-specific: injected via env substitution from the
+          # `keycloak-hostnames` ConfigMap (BROKER_EXTERNAL_URL). The localhost
+          # entry is kept so the local SSH-tunnel dev flow still works.
           redirectUris:
+            - "$(env:BROKER_EXTERNAL_URL)/auth/callback"
             - "http://localhost:8000/auth/callback"
-            - "https://broker.session-broker.example.com/auth/callback"
           webOrigins:
-            - "https://broker.session-broker.example.com"
+            - "$(env:BROKER_EXTERNAL_URL)"
           attributes:
             pkce.code.challenge.method: "S256"
           defaultClientScopes:

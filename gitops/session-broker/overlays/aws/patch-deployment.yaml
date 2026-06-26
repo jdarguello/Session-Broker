@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: session-broker
+  namespace: session-broker
+spec:
+  template:
+    spec:
+      containers:
+        - name: session-broker
+          # --- Cloud front-channel: hostnames come from a ConfigMap ---
+          # EnterpriseClaw creates `keycloak-hostnames` in this namespace carrying
+          # the tenant's external front-channel URLs:
+          #   KEYCLOAK_ISSUER_URL   = https://auth.<tenant-domain>/realms/enterpriseclaw
+          #   KEYCLOAK_REDIRECT_URI = https://broker.<tenant-domain>/auth/callback
+          # Pull them via envFrom. The base sets these two as *.example.com
+          # placeholders, and an explicit `env` value WINS over `envFrom`, so we
+          # delete them here ($patch: delete, merge-key `name`) to let the ConfigMap
+          # take effect. Everything else from base is inherited UNCHANGED — most
+          # importantly KEYCLOAK_TOKEN_URL, the in-cluster back-channel code->token
+          # endpoint, which must stay on the ClusterIP and never an external host.
+          envFrom:
+            - configMapRef:
+                name: keycloak-hostnames
+          env:
+            - name: KEYCLOAK_ISSUER_URL
+              $patch: delete
+            - name: KEYCLOAK_REDIRECT_URI
+              $patch: delete

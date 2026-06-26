@@ -14,7 +14,10 @@ spec:
           - name: session-broker
             namespace: session-broker
             kind: kustomize
-            path: gitops/session-broker/overlays/dev
+            # Cloud deploy: the AWS overlay reads front-channel hostnames from the
+            # `keycloak-hostnames` ConfigMap (created by EnterpriseClaw) instead of
+            # the localhost values used by overlays/dev. See the overlay's README/comments.
+            path: gitops/session-broker/overlays/aws
           - name: dapr
             namespace: dapr-system
             kind: helm

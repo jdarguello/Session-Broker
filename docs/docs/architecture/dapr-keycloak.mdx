@@ -117,7 +117,9 @@ If `KEYCLOAK_TOKEN_URL` is not set, the broker derives the token endpoint by app
 :::
 
 :::warning KC_HOSTNAME must be pinned to the external value
-Keycloak must have `KC_HOSTNAME` (frontend URL) set to the **external** issuer host. Because the broker POSTs to the in-cluster ClusterIP for the token exchange, Keycloak would otherwise stamp `iss` with the internal hostname — making tokens fail validation on callers that check against the external issuer. Pin `KC_HOSTNAME` so the `iss` claim is always `https://keycloak.session-broker.example.com/realms/enterpriseclaw` regardless of which host the broker contacted.
+Keycloak must have its frontend URL set to the **external** issuer host. Because the broker POSTs to the in-cluster ClusterIP for the token exchange, Keycloak would otherwise stamp `iss` with the internal hostname — making tokens fail validation on callers that check against the external issuer. The `iss` claim must always be the external issuer (e.g. `https://auth.<domain>/realms/enterpriseclaw`) regardless of which host the broker contacted.
+
+This is wired declaratively: the Keycloak workload pulls `KC_HOSTNAME_URL` / `KC_HOSTNAME_ADMIN_URL` from the tenant-owned `keycloak-hostnames` ConfigMap via `extraEnvVarsCM` (Keycloak reads raw `KC_*` env natively), and `proxyHeaders: xforwarded` makes it trust the TLS-terminating ALB's `X-Forwarded-Proto=https` so the scheme resolves to https. See [Tenant hostnames](../gitops/deployment#tenant-hostnames-keycloak-hostnames-configmaps).
 :::
 
 ---

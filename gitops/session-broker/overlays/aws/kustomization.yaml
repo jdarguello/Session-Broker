@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Cloud overlay for the EnterpriseClaw-driven AWS deploy (consumed by
+# gitops/bootstrap.yaml). Unlike overlays/dev (localhost SSH tunnel) and
+# overlays/prod (pinned release tag, 3 replicas), this overlay reads the
+# tenant's external front-channel URLs from the `keycloak-hostnames` ConfigMap
+# that EnterpriseClaw creates in this namespace. No tenant domain is hardcoded.
+
+namespace: session-broker
+
+bases:
+  - ../../base
+
+patches:
+  - path: patch-deployment.yaml
+    target:
+      kind: Deployment
+      name: session-broker
+
+images:
+  - name: ghcr.io/jdarguello/session-broker
+    newTag: latest

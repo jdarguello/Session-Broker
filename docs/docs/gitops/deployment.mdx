@@ -32,6 +32,10 @@ The GitOps manifests reference this image: the `base` deployment pins `:latest`,
 - Argo CD installed in the `argocd` namespace ([installation docs](https://argo-cd.readthedocs.io/en/stable/getting_started/))
 - A **default `StorageClass`** with a working dynamic provisioner (see below)
 - Secrets created before syncing (see below)
+- The **`keycloak-hostnames` ConfigMap(s)** carrying the tenant's external hostnames
+  (see [Tenant hostnames](#tenant-hostnames-keycloak-hostnames-configmaps) below).
+  On the EnterpriseClaw-driven cloud deploy these are created automatically by
+  `enterpriseclaw init`; on a bare/local cluster you pre-create them out-of-band.
 
 ## Cluster storage (default StorageClass)
 
@@ -131,23 +135,86 @@ This is an **explicitly accepted demo gap** — the same category as the trusted
 manifest into a pre-created `session-broker-secret` consumed via `secretKeyRef`,
 and the committed value is rotated out.
 
+## Tenant hostnames (`keycloak-hostnames` ConfigMaps)
+
+The external hostnames are **end-user configuration** (`https://auth.<domain>`,
+`https://broker.<domain>`) that this repo cannot know at author time, so they are
+**not** hardcoded. They enter through a ConfigMap named **`keycloak-hostnames`**,
+created **out-of-band** (by EnterpriseClaw's `enterpriseclaw init` on the cloud
+deploy) in **two** namespaces:
+
+| Namespace | Key | Example value | Consumed by |
+|---|---|---|---|
+| `keycloak` | `KC_HOSTNAME_URL` | `https://auth.<domain>` | Keycloak (native `KC_*` env) → issuer/front-end URL |
+| `keycloak` | `KC_HOSTNAME_ADMIN_URL` | `https://auth.<domain>` | Keycloak admin console URL |
+| `keycloak` | `BROKER_EXTERNAL_URL` | `https://broker.<domain>` | keycloak-config-cli → realm `redirectUris`/`webOrigins` via `$(env:...)` |
+| `session-broker` | `KEYCLOAK_ISSUER_URL` | `https://auth.<domain>/realms/enterpriseclaw` | broker pod (front-channel `/authorize`) |
+| `session-broker` | `KEYCLOAK_REDIRECT_URI` | `https://broker.<domain>/auth/callback` | broker pod (front-channel callback) |
+
+**How the repo consumes them** (all additive — no tenant domain is committed):
+
+- **Keycloak workload** — [`gitops/keycloak/values.yaml`](https://github.com/jdarguello/Session-Broker/blob/main/gitops/keycloak/values.yaml)
+  sets `extraEnvVarsCM: keycloak-hostnames`, so Keycloak's Quarkus runtime reads the
+  raw `KC_HOSTNAME_URL` / `KC_HOSTNAME_ADMIN_URL` natively and the discovery
+  `issuer` becomes `https://auth.<domain>/realms/enterpriseclaw`. `proxyHeaders:
+  xforwarded` makes Keycloak trust the ALB's `X-Forwarded-*` (TLS is terminated at
+  the ALB; the pod speaks HTTP), so the resolved scheme is **https**. This chart
+  ships Keycloak 25 (hostname v1), where those `KC_HOSTNAME_*_URL` keys are valid.
+- **Realm import** — the same values file gives `keycloakConfigCli.extraEnvVarsCM:
+  keycloak-hostnames`, so `$(env:BROKER_EXTERNAL_URL)` in the `session-broker`
+  client's `redirectUris`/`webOrigins` resolves at import time.
+- **Broker pod** — the AWS overlay [`overlays/aws`](https://github.com/jdarguello/Session-Broker/blob/main/gitops/session-broker/overlays/aws)
+  adds `envFrom: [{ configMapRef: { name: keycloak-hostnames } }]` and deletes the
+  base's placeholder `KEYCLOAK_ISSUER_URL` / `KEYCLOAK_REDIRECT_URI` (an explicit
+  `env` value would win over `envFrom`). The back-channel `KEYCLOAK_TOKEN_URL`
+  (in-cluster ClusterIP) is **unchanged**.
+
+> ⚠️ **The ConfigMap must exist or the workloads do not start.** A pod whose
+> `envFrom`/`extraEnvVarsCM` references a missing ConfigMap stays in
+> `CreateContainerConfigError`; a missing `BROKER_EXTERNAL_URL` makes the realm
+> import abort with `Cannot resolve variable 'env:BROKER_EXTERNAL_URL'`. On the
+> cloud deploy this is eventually-consistent (EnterpriseClaw creates the ConfigMaps
+> before the ApplicationSet; Argo retries until they appear). On a **bare/local
+> cluster** there is no EnterpriseClaw, so create at least the `keycloak`-namespace
+> ConfigMap yourself (the local app-of-apps `session-broker` app uses `overlays/dev`
+> with explicit localhost env, so it does **not** need the `session-broker`-namespace
+> copy):
+
+```bash
+# Local (kubeadm-in-UTM) — localhost values for the SSH-tunnel dev flow.
+# Only the keycloak namespace is required locally (Keycloak + the realm import
+# read it via the shared keycloak values; overlays/dev sets the broker URLs directly).
+kubectl create configmap keycloak-hostnames -n keycloak \
+  --from-literal=KC_HOSTNAME_URL=http://localhost:8080 \
+  --from-literal=KC_HOSTNAME_ADMIN_URL=http://localhost:8080 \
+  --from-literal=BROKER_EXTERNAL_URL=http://localhost:8000 \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
 ## Bootstrap
 
-Pick **one** of the two equivalent entry points (do not apply both — they create the same four Applications and would collide).
+Pick **one** entry point (do not apply both — they create the same four Application
+names and would collide). The two paths are **no longer interchangeable**: they
+point the `session-broker` element at **different overlays**.
 
-**Option A — app-of-apps root:**
+**Option A — app-of-apps root (local / SSH-tunnel dev flow):** `session-broker`
+uses [`overlays/dev`](https://github.com/jdarguello/Session-Broker/blob/main/gitops/session-broker/overlays/dev)
+(localhost front-channel env).
 
 ```bash
 kubectl apply -f gitops/apps/root-app.yaml
 ```
 
-**Option B — ApplicationSet (single file):**
+**Option B — ApplicationSet (EnterpriseClaw-driven cloud deploy):** `session-broker`
+uses [`overlays/aws`](https://github.com/jdarguello/Session-Broker/blob/main/gitops/session-broker/overlays/aws),
+which reads its front-channel URLs from the `session-broker`-namespace
+`keycloak-hostnames` ConfigMap.
 
 ```bash
 kubectl apply -f gitops/bootstrap.yaml
 ```
 
-Either way, Argo CD discovers and syncs all child Applications (`dapr`, `keycloak`, `redis`, `session-broker`). The ApplicationSet requires the **applicationset-controller**, which ships with the default Argo CD install.
+Either way, Argo CD discovers and syncs all child Applications (`dapr`, `keycloak`, `redis`, `session-broker`). The ApplicationSet requires the **applicationset-controller**, which ships with the default Argo CD install. Both paths share the same `gitops/keycloak/values.yaml`, so **both** require the `keycloak`-namespace `keycloak-hostnames` ConfigMap.
 
 ## Verify
 
@@ -192,7 +259,7 @@ The catalog (see the [authorization model](../architecture/dapr-keycloak)):
 
 | Resource | What it defines |
 |---|---|
-| **Client** `session-broker` | confidential OAuth client, PKCE `S256`, redirect URIs (prod ALB + `localhost:8000` tunnel), `groups` token mapper, `offline_access` |
+| **Client** `session-broker` | confidential OAuth client, PKCE `S256`, redirect URIs (`$(env:BROKER_EXTERNAL_URL)/auth/callback` from the [`keycloak-hostnames` ConfigMap](#tenant-hostnames-keycloak-hostnames-configmaps) + `localhost:8000` tunnel), `groups` token mapper, `offline_access` |
 | **Agent clients** `issue-tracker`, `infra-provisioner` | `bearerOnly` resource clients holding client roles + audience (no login flow) |
 | **Workload client** `kagent-controller` | service-account client (`client_credentials`, no login flow) for the EnterpriseClaw kagent controller's tool-discovery; carries both agent audiences + `issue:create` & `db:provision:dev` via its service-account user `service-account-kagent-controller` |
 | **Realm roles** | `agent-user` (baseline), `senior-engineer` (composite → `infra-provisioner:db:provision:dev`) |
