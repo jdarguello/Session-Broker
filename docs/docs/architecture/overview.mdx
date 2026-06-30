@@ -37,7 +37,7 @@ The demo ships the real OAuth Authorization-Code write path plus the read path, 
 
 ### 2) Write path — callback exchange & store (`GET /auth/callback`, browser-reachable)
 
-The user authenticates via Google → Keycloak; Keycloak redirects the browser (through the AWS ALB Ingress) to `/auth/callback?code=&state=`. The broker then runs three internal steps:
+The user authenticates via Google → Keycloak; Keycloak redirects the browser (through EnterpriseClaw's shared ALB + Istio Gateway) to `/auth/callback?code=&state=`. The broker then runs three internal steps:
 
 1. **Identify** — consume the one-time nonce `login:{state}` (deleted on first read — single use), recovering `slack_user_id` and `code_verifier`. An invalid or already-consumed nonce returns `400`.
 2. **Exchange** — a **back-channel** POST of `code` + `code_verifier` + `client_id`/`client_secret` to the **in-cluster** Keycloak token endpoint (`KEYCLOAK_TOKEN_URL`), receiving access + refresh + ID tokens. This call never hairpins out through the ALB. A failure returns `502`.
@@ -78,7 +78,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant U as User Browser
-    participant ALB as AWS ALB Ingress
+    participant ALB as EnterpriseClaw ALB + Istio GW
     participant K as Keycloak (Google IdP)
     participant B as Session Broker (writer)
     participant D as Dapr Sidecar

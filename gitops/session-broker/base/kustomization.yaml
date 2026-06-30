@@ -7,7 +7,14 @@ resources:
   - serviceaccount.yaml
   - deployment.yaml
   - service.yaml
-  - ingress.yaml
+  # No callback Ingress here: browser exposure of GET /auth/callback is owned by
+  # the EnterpriseClaw main project (shared platform ALB + Istio Gateway +
+  # VirtualService routing broker.<tenant-domain>/auth/callback -> the broker
+  # Service). A broker-owned ALB Ingress is redundant with that exposure and, on
+  # the cloud deploy, never gets an ACM cert for its placeholder host, so the AWS
+  # LB Controller never builds an ALB and Argo CD's Ingress health check pins the
+  # app in Progressing forever. Keeping exposure in EnterpriseClaw also respects
+  # the scope boundary (Istio/edge routing live there, not in this repo).
   - dapr-statestore.yaml
   # dapr-bearer-middleware.yaml excluded for demo: bearer validation removed
   # from the global pipeline (see dapr-configuration.yaml). Re-include at

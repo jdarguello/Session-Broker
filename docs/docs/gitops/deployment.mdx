@@ -283,8 +283,9 @@ The catalog (see the [authorization model](../architecture/dapr-keycloak)):
 
 ## Stage B: running the OAuth write path locally (no AWS ALB)
 
-The production write path exposes `GET /auth/callback` through an **AWS ALB
-Ingress**, which has no address on the local kubeadm-in-UTM cluster. You do **not**
+The production write path exposes `GET /auth/callback` through **EnterpriseClaw's
+shared AWS ALB + Istio Gateway** (this repo no longer ships its own callback
+Ingress), which has no address on the local kubeadm-in-UTM cluster. You do **not**
 need a cloud load balancer to run the full browser flow locally — only the user's
 **browser** ever dereferences the front-channel URLs (OAuth redirects are HTTP
 `302`s to the user-agent, never server-to-server calls). An **SSH tunnel** from the

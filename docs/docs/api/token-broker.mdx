@@ -33,8 +33,8 @@ The OAuth Authorization-Code write path requires the following to be in place be
 | PKCE method | `S256` |
 | Keycloak realm | `session-broker` |
 
-:::warning AWS ALB prerequisite
-The user's browser is redirected to `GET /auth/callback`, so the broker's write path must be reachable from the internet via the **AWS ALB Ingress**. The current local kubeadm-in-UTM cluster has no ingress controller, so the ALB Ingress address is only available on an AWS-backed cluster. Track this as a demo prerequisite.
+:::warning Edge exposure prerequisite (owned by EnterpriseClaw)
+The user's browser is redirected to `GET /auth/callback`, so the broker's write path must be reachable from the internet. **This repo does not ship an Ingress** — edge exposure is provided by the EnterpriseClaw main project (shared platform **AWS ALB** + **Istio Gateway/VirtualService** routing `broker.<tenant-domain>/auth/callback` to the broker Service). That ALB + Istio Gateway only exist on the AWS-backed platform cluster; the local kubeadm-in-UTM cluster has no ingress controller, so `overlays/dev` reaches the broker through an SSH tunnel instead. Track this as a demo prerequisite.
 :::
 
 ---
@@ -99,8 +99,8 @@ Content-Type: application/json
 
 The user's browser arrives here after Keycloak authentication. The broker runs three internal steps and then redirects the user to a success page (or returns 400/500 on failure).
 
-:::note Browser-reachable via the AWS ALB Ingress
-This endpoint must be registered as the `redirect_uri` in the Keycloak confidential client. It is the only write-path endpoint that is internet-exposed.
+:::note Browser-reachable via EnterpriseClaw's shared ALB + Istio Gateway
+This endpoint must be registered as the `redirect_uri` in the Keycloak confidential client. It is the only write-path endpoint that is internet-exposed, and its exposure is provided by EnterpriseClaw (not a broker-owned Ingress).
 :::
 
 ### Request

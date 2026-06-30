@@ -33,7 +33,7 @@ EnterpriseClaw gateway
         │
         │ Browser redirect: GET /auth/callback?code=&state=
         ▼
-  Session Broker  ← reached via AWS ALB Ingress
+  Session Broker  ← reached via EnterpriseClaw's shared ALB + Istio Gateway
         │ Step 1 — Identify: consume nonce (delete-on-read) → slack_user_id + code_verifier
         │ Step 2 — Exchange: POST code + client_secret + code_verifier to Keycloak token endpoint
         │            ← access_token, refresh_token, id_token (provenance guaranteed)
@@ -68,12 +68,14 @@ The `state` nonce is minted by the broker (not the caller) and stored single-use
 The broker only ever calls Keycloak. Google Workspace federation is configured inside Keycloak and is transparent to the broker's code.
 :::
 
-### ALB Ingress
+### Callback exposure (owned by EnterpriseClaw)
 
-The callback endpoint `GET /auth/callback` must be browser-reachable. It is exposed via a Kubernetes Ingress with AWS ALB Controller annotations, matching the EnterpriseClaw main project's ingress pattern.
+The callback endpoint `GET /auth/callback` must be browser-reachable. **This repo does not ship an Ingress for it.** Edge exposure is owned by the EnterpriseClaw main project: the shared platform **AWS ALB** plus an **Istio Gateway + VirtualService** route `broker.<tenant-domain>/auth/callback` to the broker Service. The broker's `redirect_uri` (supplied via the `keycloak-hostnames` ConfigMap) points at that EnterpriseClaw-fronted host.
+
+This keeps the scope boundary clean — Istio and edge routing live in EnterpriseClaw, not here — and avoids a broker-owned ALB Ingress that, on the cloud deploy, never gets an ACM cert for its placeholder host (so the AWS LB Controller never builds an ALB and Argo CD's Ingress health check pins the app in `Progressing` forever).
 
 :::warning Demo prerequisite
-The ALB Ingress only resolves on an AWS-backed cluster running the AWS Load Balancer Controller. The current local kubeadm-in-UTM cluster has no ingress controller — the callback URL will not be reachable there.
+Browser reachability of `/auth/callback` depends on EnterpriseClaw's shared ALB + Istio Gateway, which only exist on the AWS-backed platform cluster. On the local kubeadm-in-UTM cluster there is no ingress controller; the `overlays/dev` path instead reaches the broker through an SSH tunnel (see the GitOps deployment guide, Stage B).
 :::
 
 ---
@@ -109,7 +111,7 @@ Browser                         Broker pod (writer)              Keycloak (in-cl
 ```
 
 :::info Writer security posture
-The writer pod sits in a **private subnet**. It is reachable from the internet **only on `/auth/callback`** via the AWS ALB Ingress. All other communication (nonce store → Redis, token exchange → Keycloak ClusterIP) is east-west, never leaving the cluster. Internet-exposure and backend-reach are intentionally separated by this channel split.
+The writer pod sits in a **private subnet**. It is reachable from the internet **only on `/auth/callback`** via EnterpriseClaw's shared ALB + Istio Gateway. All other communication (nonce store → Redis, token exchange → Keycloak ClusterIP) is east-west, never leaving the cluster. Internet-exposure and backend-reach are intentionally separated by this channel split.
 :::
 
 :::info KEYCLOAK_TOKEN_URL fallback
