@@ -319,7 +319,7 @@ keycloakConfigCli:
       identityProviderMappers:
         - name: default-engineering-group
           identityProviderAlias: google
-          identityProviderMapper: "hardcoded-group-idp-mapper"
+          identityProviderMapper: "oidc-hardcoded-group-idp-mapper"
           config:
             group: "/engineering"
             syncMode: "INHERIT"
